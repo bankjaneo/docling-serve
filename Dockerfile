@@ -55,7 +55,7 @@ COPY --chown=1001:1001 pyproject.toml uv.lock ./
 # Install dependencies with CUDA 12.8 support
 # Use --no-group pypi --group cu128 to install CUDA 12.8 PyTorch
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev --no-group pypi --group cu128
+    uv sync --frozen --no-dev --no-group pypi --group cu128 --python python3.12
 
 # Copy application code
 COPY --chown=1001:1001 docling_serve ./docling_serve
