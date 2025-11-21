@@ -15,6 +15,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     LANG=en_US.UTF-8 \
     LC_ALL=en_US.UTF-8 \
     PYTHONIOENCODING=utf-8 \
+    PATH="/opt/app-root/bin:$PATH" \
     UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
     UV_PROJECT_ENVIRONMENT=/opt/app-root \
@@ -25,6 +26,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.12 \
     python3.12-dev \
+    python3.12-venv \
     python3-pip \
     tesseract-ocr \
     tesseract-ocr-eng \
@@ -45,6 +47,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN mkdir -p /opt/app-root/src && \
     groupadd -g 1001 appuser && \
     useradd -r -u 1001 -g appuser -d /opt/app-root -s /sbin/nologin appuser && \
+    python3.12 -m venv /opt/app-root && \
     chown -R 1001:1001 /opt/app-root
 
 WORKDIR /opt/app-root/src
