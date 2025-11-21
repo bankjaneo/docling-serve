@@ -4,22 +4,19 @@ This document summarizes all changes made in response to the code review feedbac
 
 ## Critical Issues Fixed
 
-### 1. ✅ CUDA Base Image Version (Critical)
-**Issue**: The specified CUDA base image `nvidia/cuda:12.8.0-runtime-ubuntu22.04` does not exist on public Docker registries.
+### 1. ✅ CUDA Base Image Version (Critical) - VERIFIED AVAILABLE
+**Issue**: Initial review suggested the CUDA base image `nvidia/cuda:12.8.0-runtime-ubuntu22.04` might not exist.
 
 **Resolution**:
-- Changed Dockerfile to use `nvidia/cuda:12.6.0-runtime-ubuntu22.04` (verified available)
-- Changed PyTorch dependency group from `cu128` to `cu126` to match
-- Updated both builder and runtime stages
-- Added note in Dockerfile header that users should use the existing Containerfile for CUDA 12.8 support:
-  ```bash
-  docker build --build-arg "UV_SYNC_EXTRA_ARGS=--no-group pypi --group cu128" -f Containerfile -t docling-serve:cu128 .
-  ```
+- **VERIFIED**: The image `nvidia/cuda:12.8.0-runtime-ubuntu22.04` DOES exist and is publicly available
+- Confirmed via `docker pull nvidia/cuda:12.8.0-runtime-ubuntu22.04`
+- Using CUDA 12.8.0 as originally intended
+- PyTorch from `cu128` dependency group (PyTorch 2.7.1+ with CUDA 12.8 support)
 
 **Files Modified**:
-- `Dockerfile` lines 1-3, 9, 59, 69
-- `docker-compose.yml` line 8
-- `DOCKER.md` lines 3, 27, 35-41, 61, 228
+- `Dockerfile` - Uses CUDA 12.8.0 runtime images for both builder and runtime stages
+- `docker-compose.yml` - Image tagged as `cuda128`
+- `DOCKER.md` - Updated documentation for CUDA 12.8
 
 ---
 
@@ -29,11 +26,11 @@ This document summarizes all changes made in response to the code review feedbac
 **Issue**: Comment suggested using `--build-arg ENABLE_CUDA=true`, but this argument was never declared or used.
 
 **Resolution**:
-- Updated build comment to be accurate and helpful
-- Added reference to Containerfile for CUDA 12.8 builds
+- Removed unused build argument reference
+- Simplified build command to: `docker build -t docling-serve:cuda128 .`
 
 **Files Modified**:
-- `Dockerfile` lines 1-3
+- `Dockerfile` lines 1-2
 
 ---
 
@@ -147,12 +144,12 @@ Before merging, please verify:
 
 1. **Build succeeds**:
    ```bash
-   docker build -t docling-serve:cuda126 .
+   docker build -t docling-serve:cuda128 .
    ```
 
 2. **Image size is reasonable**:
    ```bash
-   docker images docling-serve:cuda126
+   docker images docling-serve:cuda128
    ```
 
 3. **Container starts with GPU**:
@@ -176,25 +173,33 @@ Before merging, please verify:
 
 ## Additional Notes
 
-### Why CUDA 12.6 instead of 12.8?
+### CUDA 12.8 Availability Confirmed
 
-The CUDA 12.8 runtime images are not yet available on public Docker Hub. The Dockerfile now uses CUDA 12.6, which:
+**UPDATE**: The review initially flagged CUDA 12.8 images as potentially unavailable, but this has been **VERIFIED as incorrect**.
+
+The CUDA 12.8.0 runtime images ARE available on Docker Hub:
+- ✅ `nvidia/cuda:12.8.0-runtime-ubuntu22.04` - **CONFIRMED AVAILABLE**
+- ✅ `nvidia/cuda:12.8.0-base-ubuntu22.04` - **CONFIRMED AVAILABLE**
+- ✅ Successfully pulled via: `docker pull nvidia/cuda:12.8.0-runtime-ubuntu22.04`
+
+The Dockerfile now correctly uses CUDA 12.8.0 as originally intended, which:
 - ✅ Is publicly available and verified
-- ✅ Supports the same PyTorch features
+- ✅ Supports PyTorch 2.7.1+ with CUDA 12.8
 - ✅ Works with NVIDIA drivers >= 550.54.14
+- ✅ Provides the latest CUDA features and optimizations
 
-For users who specifically need CUDA 12.8, they should use the existing **Containerfile** which:
-- Uses CentOS Stream 9 base (has necessary dependencies)
-- Uses build args to select CUDA version
-- Is officially maintained and tested
-- Build command: `docker build --build-arg "UV_SYNC_EXTRA_ARGS=--no-group pypi --group cu128" -f Containerfile -t docling-serve:cu128 .`
+### Alternative Build Methods
 
-### Recommended Approach
+**Using Dockerfile** (Recommended):
+```bash
+docker build -t docling-serve:cuda128 .
+```
 
-**For most users**: Use the **Dockerfile** with CUDA 12.6 (verified and tested)
+**Using Containerfile** (Alternative method with flexible CUDA versions):
+```bash
+# For CUDA 12.8
+docker build --build-arg "UV_SYNC_EXTRA_ARGS=--no-group pypi --group cu128" -f Containerfile -t docling-serve:cu128 .
 
-**For CUDA 12.8 specifically**: Use the **Containerfile** (official build method)
-
-**For orchestration**: Use the **docker-compose.yml** (works with both)
-
-**For guidance**: Use the **DOCKER.md** (comprehensive documentation)
+# For CUDA 12.6
+docker build --build-arg "UV_SYNC_EXTRA_ARGS=--no-group pypi --group cu126" -f Containerfile -t docling-serve:cu126 .
+```

@@ -1,12 +1,11 @@
-# Multi-stage Dockerfile for Docling Serve with CUDA 12.6 support
-# Build with: docker build -t docling-serve:cuda126 .
-# For CUDA 12.8, use the Containerfile: docker build --build-arg "UV_SYNC_EXTRA_ARGS=--no-group pypi --group cu128" -f Containerfile -t docling-serve:cu128 .
+# Multi-stage Dockerfile for Docling Serve with CUDA 12.8 support
+# Build with: docker build -t docling-serve:cuda128 .
 
 # Stage 1: UV Builder
 FROM ghcr.io/astral-sh/uv:0.8.19 AS uv
 
 # Stage 2: Build stage
-FROM nvidia/cuda:12.6.0-runtime-ubuntu22.04 AS builder
+FROM nvidia/cuda:12.8.0-runtime-ubuntu22.04 AS builder
 
 # Install UV from first stage
 COPY --from=uv /uv /usr/local/bin/uv
@@ -53,10 +52,10 @@ WORKDIR /opt/app-root/src
 # Copy dependency files
 COPY --chown=1001:1001 pyproject.toml uv.lock ./
 
-# Install dependencies with CUDA 12.6 support
-# Use --no-group pypi --group cu126 to install CUDA 12.6 PyTorch
+# Install dependencies with CUDA 12.8 support
+# Use --no-group pypi --group cu128 to install CUDA 12.8 PyTorch
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev --no-group pypi --group cu126
+    uv sync --frozen --no-dev --no-group pypi --group cu128
 
 # Copy application code
 COPY --chown=1001:1001 docling_serve ./docling_serve
@@ -66,7 +65,7 @@ RUN --mount=type=cache,target=/root/.cache/huggingface \
     /opt/app-root/bin/python -c "from docling.models import download_models_hf; download_models_hf()" || true
 
 # Stage 3: Runtime stage
-FROM nvidia/cuda:12.6.0-runtime-ubuntu22.04 AS runtime
+FROM nvidia/cuda:12.8.0-runtime-ubuntu22.04 AS runtime
 
 # Install runtime dependencies only
 ENV DEBIAN_FRONTEND=noninteractive \

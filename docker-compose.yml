@@ -5,7 +5,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: docling-serve:cuda126
+    image: docling-serve:cuda128
     container_name: docling-serve
 
     environment:
