@@ -184,16 +184,21 @@ async def unload_external_models():
 
 async def _unload_llama_swap(base_url: str):
     """Unload models from llama-swap by calling the /unload endpoint."""
-    url = f"{base_url.rstrip('/')}/unload"
+    # Parse URL to extract only scheme and netloc, stripping any path components
+    # This handles cases where users include /v1 or other paths in the base URL
+    parsed = httpx.URL(base_url)
+    clean_base_url = f"{parsed.scheme}://{parsed.netloc}"
+    url = f"{clean_base_url}/unload"
+
     try:
         async with httpx.AsyncClient(
             timeout=docling_serve_settings.unload_external_model_timeout
         ) as client:
             response = await client.get(url)
             response.raise_for_status()
-            _log.info(f"Successfully unloaded llama-swap models at {base_url}")
+            _log.info(f"Successfully unloaded llama-swap models at {clean_base_url}")
     except Exception as e:
-        _log.warning(f"Failed to unload llama-swap models at {base_url}: {e}")
+        _log.warning(f"Failed to unload llama-swap models at {clean_base_url}: {e}")
         raise
 
 
