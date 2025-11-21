@@ -43,7 +43,7 @@ from docling_jobkit.datamodel.chunking import (
 )
 from docling_jobkit.datamodel.http_inputs import FileSource, HttpSource
 from docling_jobkit.datamodel.s3_coords import S3Coordinates
-from docling_jobkit.datamodel.task import Task, TaskSource, TaskType
+from docling_jobkit.datamodel.task import Task, TaskSource, TaskStatus, TaskType
 from docling_jobkit.datamodel.task_targets import (
     InBodyTarget,
     ZipTarget,
@@ -126,7 +126,7 @@ async def lifespan(app: FastAPI):
     orchestrator.bind_notifier(notifier)
 
     # Warm up processing cache
-    if docling_serve_settings.load_models_at_boot:
+    if docling_serve_settings.load_models_at_boot and not docling_serve_settings.free_vram_on_idle:
         await orchestrator.warm_up_caches()
 
     # Start the background queue processor
@@ -144,6 +144,46 @@ async def lifespan(app: FastAPI):
     # Remove scratch directory in case it was a tempfile
     if docling_serve_settings.scratch_path is not None:
         shutil.rmtree(scratch_dir, ignore_errors=True)
+
+
+##################################
+# Lazy loading helper functions #
+##################################
+
+
+async def ensure_models_loaded(orchestrator: BaseOrchestrator):
+    """Ensure models are loaded before processing if lazy loading is enabled."""
+    if docling_serve_settings.free_vram_on_idle:
+        _log.info("Loading models for processing...")
+        await orchestrator.warm_up_caches()
+
+
+async def cleanup_models_if_needed(orchestrator: BaseOrchestrator):
+    """Clear models after processing if lazy loading is enabled to free VRAM."""
+    if docling_serve_settings.free_vram_on_idle:
+        _log.info("Clearing models to free VRAM...")
+        await orchestrator.clear_converters()
+
+
+async def cleanup_models_background(orchestrator: BaseOrchestrator, task_id: str):
+    """
+    Background task to clean up models after task completion.
+    Waits for the task to complete, then clears models if lazy loading is enabled.
+    """
+    if not docling_serve_settings.free_vram_on_idle:
+        return
+
+    # Wait for the task to complete
+    max_wait_time = docling_serve_settings.max_document_timeout
+    start_time = time.monotonic()
+
+    while time.monotonic() - start_time < max_wait_time:
+        task = await orchestrator.task_status(task_id=task_id)
+        if task and task.task_status in [TaskStatus.SUCCESS, TaskStatus.FAILURE]:
+            # Task completed, now cleanup models
+            await cleanup_models_if_needed(orchestrator)
+            return
+        await asyncio.sleep(5)  # Check every 5 seconds
 
 
 ##################################
@@ -269,7 +309,11 @@ def create_app():  # noqa: C901
     async def _enque_source(
         orchestrator: BaseOrchestrator,
         request: ConvertDocumentsRequest | GenericChunkDocumentsRequest,
+        background_tasks: BackgroundTasks | None = None,
     ) -> Task:
+        # Ensure models are loaded before enqueueing if lazy loading is enabled
+        await ensure_models_loaded(orchestrator)
+
         sources: list[TaskSource] = []
         for s in request.sources:
             if isinstance(s, FileSourceRequest):
@@ -304,6 +348,11 @@ def create_app():  # noqa: C901
             chunking_export_options=chunking_export_options,
             target=request.target,
         )
+
+        # Schedule background cleanup after task completes
+        if background_tasks:
+            background_tasks.add_task(cleanup_models_background, orchestrator, task.task_id)
+
         return task
 
     async def _enque_file(
@@ -314,7 +363,11 @@ def create_app():  # noqa: C901
         chunking_options: BaseChunkerOptions | None,
         chunking_export_options: ChunkingExportOptions | None,
         target: TargetRequest,
+        background_tasks: BackgroundTasks | None = None,
     ) -> Task:
+        # Ensure models are loaded before enqueueing if lazy loading is enabled
+        await ensure_models_loaded(orchestrator)
+
         _log.info(f"Received {len(files)} files for processing.")
 
         # Load the uploaded files to Docling DocumentStream
@@ -333,6 +386,11 @@ def create_app():  # noqa: C901
             chunking_export_options=chunking_export_options,
             target=target,
         )
+
+        # Schedule background cleanup after task completes
+        if background_tasks:
+            background_tasks.add_task(cleanup_models_background, orchestrator, task.task_id)
+
         return task
 
     async def _wait_task_complete(orchestrator: BaseOrchestrator, task_id: str) -> bool:
@@ -466,7 +524,7 @@ def create_app():  # noqa: C901
         conversion_request: ConvertDocumentsRequest,
     ):
         task = await _enque_source(
-            orchestrator=orchestrator, request=conversion_request
+            orchestrator=orchestrator, request=conversion_request, background_tasks=background_tasks
         )
         completed = await _wait_task_complete(
             orchestrator=orchestrator, task_id=task.task_id
@@ -523,6 +581,7 @@ def create_app():  # noqa: C901
             chunking_options=None,
             chunking_export_options=None,
             target=target,
+            background_tasks=background_tasks,
         )
         completed = await _wait_task_complete(
             orchestrator=orchestrator, task_id=task.task_id
@@ -556,12 +615,13 @@ def create_app():  # noqa: C901
         response_model=TaskStatusResponse,
     )
     async def process_url_async(
+        background_tasks: BackgroundTasks,
         auth: Annotated[AuthenticationResult, Depends(require_auth)],
         orchestrator: Annotated[BaseOrchestrator, Depends(get_async_orchestrator)],
         conversion_request: ConvertDocumentsRequest,
     ):
         task = await _enque_source(
-            orchestrator=orchestrator, request=conversion_request
+            orchestrator=orchestrator, request=conversion_request, background_tasks=background_tasks
         )
         task_queue_position = await orchestrator.get_queue_position(
             task_id=task.task_id
@@ -599,6 +659,7 @@ def create_app():  # noqa: C901
             chunking_options=None,
             chunking_export_options=None,
             target=target,
+            background_tasks=background_tasks,
         )
         task_queue_position = await orchestrator.get_queue_position(
             task_id=task.task_id
@@ -630,7 +691,7 @@ def create_app():  # noqa: C901
             orchestrator: Annotated[BaseOrchestrator, Depends(get_async_orchestrator)],
             request: req_cls,
         ):
-            task = await _enque_source(orchestrator=orchestrator, request=request)
+            task = await _enque_source(orchestrator=orchestrator, request=request, background_tasks=background_tasks)
             task_queue_position = await orchestrator.get_queue_position(
                 task_id=task.task_id
             )
@@ -693,6 +754,7 @@ def create_app():  # noqa: C901
                     include_converted_doc=include_converted_doc
                 ),
                 target=target,
+                background_tasks=background_tasks,
             )
             task_queue_position = await orchestrator.get_queue_position(
                 task_id=task.task_id
@@ -723,7 +785,7 @@ def create_app():  # noqa: C901
             orchestrator: Annotated[BaseOrchestrator, Depends(get_async_orchestrator)],
             request: req_cls,
         ):
-            task = await _enque_source(orchestrator=orchestrator, request=request)
+            task = await _enque_source(orchestrator=orchestrator, request=request, background_tasks=background_tasks)
             completed = await _wait_task_complete(
                 orchestrator=orchestrator, task_id=task.task_id
             )

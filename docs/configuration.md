@@ -50,6 +50,7 @@ THe following table describes the options to configure the Docling Serve app.
 |  | `DOCLING_SERVE_SYNC_POLL_INTERVAL` | `2` | Number of seconds to sleep between polling the task status in the sync endpoints. |
 |  | `DOCLING_SERVE_MAX_SYNC_WAIT` | `120` | Max number of seconds a synchronous endpoint is waiting for the task completion. |
 |  | `DOCLING_SERVE_LOAD_MODELS_AT_BOOT` | `True` | If enabled, the models for the default options will be loaded at boot. |
+|  | `DOCLING_SERVE_FREE_VRAM_ON_IDLE` | `False` | If enabled, OCR models are loaded only before processing and unloaded after completion to free VRAM. Useful for low VRAM systems and Docker deployments. When enabled, `LOAD_MODELS_AT_BOOT` is automatically disabled. |
 |  | `DOCLING_SERVE_OPTIONS_CACHE_SIZE` | `2` | How many DocumentConveter objects (including their loaded models) to keep in the cache. |
 |  | `DOCLING_SERVE_QUEUE_MAX_SIZE` | | Size of the pages queue. Potentially so many pages opened at the same time. |
 |  | `DOCLING_SERVE_OCR_BATCH_SIZE` | | Batch size for the OCR stage. |
