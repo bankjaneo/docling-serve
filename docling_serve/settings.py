@@ -50,6 +50,12 @@ class DoclingServeSettings(BaseSettings):
     free_vram_on_idle: bool = False
     cleanup_poll_interval: float = 5.0  # seconds
     options_cache_size: int = 2
+
+    # External model unloading (for low VRAM systems)
+    unload_ollama_base_url: Optional[str] = None
+    unload_ollama_model: Optional[str] = None
+    unload_llama_swap_base_url: Optional[str] = None
+    unload_external_model_timeout: float = 10.0  # seconds
     enable_remote_services: bool = False
     allow_external_plugins: bool = False
     show_version_info: bool = True

@@ -8,6 +8,8 @@ from contextlib import asynccontextmanager
 from io import BytesIO
 from typing import Annotated
 
+import httpx
+
 from fastapi import (
     BackgroundTasks,
     Depends,
@@ -151,9 +153,77 @@ async def lifespan(app: FastAPI):
 ##################################
 
 
+async def unload_external_models():
+    """
+    Unload models from external services (Ollama or llama-swap) to free VRAM
+    before loading Docling models. This is useful for systems with low VRAM
+    that need to swap models between different applications.
+    """
+    tasks = []
+
+    # Unload from llama-swap if configured
+    if docling_serve_settings.unload_llama_swap_base_url:
+        tasks.append(
+            ("llama-swap", _unload_llama_swap(docling_serve_settings.unload_llama_swap_base_url))
+        )
+
+    # Unload from Ollama if configured
+    if docling_serve_settings.unload_ollama_base_url and docling_serve_settings.unload_ollama_model:
+        tasks.append(
+            ("Ollama", _unload_ollama(
+                docling_serve_settings.unload_ollama_base_url,
+                docling_serve_settings.unload_ollama_model
+            ))
+        )
+
+    # Execute all unload tasks concurrently
+    if tasks:
+        _log.info(f"Unloading external models from: {', '.join([name for name, _ in tasks])}")
+        await asyncio.gather(*[task for _, task in tasks], return_exceptions=True)
+
+
+async def _unload_llama_swap(base_url: str):
+    """Unload models from llama-swap by calling the /unload endpoint."""
+    # Parse URL to extract only scheme and netloc, stripping any path components
+    # This handles cases where users include /v1 or other paths in the base URL
+    parsed = httpx.URL(base_url)
+    clean_base_url = f"{parsed.scheme}://{parsed.netloc}"
+    url = f"{clean_base_url}/unload"
+
+    try:
+        async with httpx.AsyncClient(
+            timeout=docling_serve_settings.unload_external_model_timeout
+        ) as client:
+            response = await client.get(url)
+            response.raise_for_status()
+            _log.info(f"Successfully unloaded llama-swap models at {clean_base_url}")
+    except Exception as e:
+        _log.warning(f"Failed to unload llama-swap models at {clean_base_url}: {e}")
+        raise
+
+
+async def _unload_ollama(base_url: str, model_name: str):
+    """Unload models from Ollama by setting keep_alive to 0."""
+    url = f"{base_url.rstrip('/')}/api/generate"
+    payload = {"model": model_name, "keep_alive": 0}
+    try:
+        async with httpx.AsyncClient(
+            timeout=docling_serve_settings.unload_external_model_timeout
+        ) as client:
+            response = await client.post(url, json=payload)
+            response.raise_for_status()
+            _log.info(f"Successfully unloaded Ollama model '{model_name}' at {base_url}")
+    except Exception as e:
+        _log.warning(f"Failed to unload Ollama model '{model_name}' at {base_url}: {e}")
+        raise
+
+
 async def ensure_models_loaded(orchestrator: BaseOrchestrator):
     """Ensure models are loaded before processing if lazy loading is enabled."""
     if docling_serve_settings.free_vram_on_idle:
+        # First, unload external models to free VRAM if configured
+        await unload_external_models()
+        # Then load Docling models
         _log.info("Loading models for processing...")
         await orchestrator.warm_up_caches()
 
