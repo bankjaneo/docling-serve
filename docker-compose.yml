@@ -1,0 +1,234 @@
+version: '3.8'
+
+services:
+  docling-serve:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: docling-serve:cuda128
+    container_name: docling-serve
+
+    # NVIDIA GPU runtime configuration for CUDA 12.8
+    runtime: nvidia
+
+    environment:
+      # GPU Configuration
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+
+      # ========================================
+      # Uvicorn Web Server Configuration
+      # ========================================
+      UVICORN_HOST: 0.0.0.0
+      UVICORN_PORT: 5001
+      UVICORN_RELOAD: "false"
+      UVICORN_WORKERS: 1
+      UVICORN_ROOT_PATH: ""
+      UVICORN_PROXY_HEADERS: "true"
+      UVICORN_TIMEOUT_KEEP_ALIVE: 60
+      # UVICORN_SSL_CERTFILE: /path/to/cert.pem
+      # UVICORN_SSL_KEYFILE: /path/to/key.pem
+      # UVICORN_SSL_KEYFILE_PASSWORD: your_password
+
+      # ========================================
+      # Docling Serve Application Configuration
+      # ========================================
+      # Paths
+      # DOCLING_SERVE_ARTIFACTS_PATH: /opt/app-root/artifacts
+      # DOCLING_SERVE_STATIC_PATH: /opt/app-root/static
+      # DOCLING_SERVE_SCRATCH_PATH: /opt/app-root/scratch
+
+      # UI and Features
+      DOCLING_SERVE_ENABLE_UI: "false"
+      DOCLING_SERVE_SHOW_VERSION_INFO: "true"
+      DOCLING_SERVE_ENABLE_REMOTE_SERVICES: "false"
+      DOCLING_SERVE_ALLOW_EXTERNAL_PLUGINS: "false"
+
+      # Results Management
+      DOCLING_SERVE_SINGLE_USE_RESULTS: "true"
+      DOCLING_SERVE_RESULT_REMOVAL_DELAY: 300
+
+      # Processing Limits
+      DOCLING_SERVE_MAX_DOCUMENT_TIMEOUT: 604800  # 7 days in seconds
+      # DOCLING_SERVE_MAX_NUM_PAGES: 1000
+      # DOCLING_SERVE_MAX_FILE_SIZE: 104857600  # 100MB in bytes
+
+      # Synchronous Processing
+      DOCLING_SERVE_SYNC_POLL_INTERVAL: 2
+      DOCLING_SERVE_MAX_SYNC_WAIT: 120
+
+      # Model Management
+      DOCLING_SERVE_LOAD_MODELS_AT_BOOT: "True"
+      DOCLING_SERVE_FREE_VRAM_ON_IDLE: "False"
+      DOCLING_SERVE_CLEANUP_POLL_INTERVAL: 5.0
+
+      # External Model Unloading (Ollama)
+      # DOCLING_SERVE_UNLOAD_OLLAMA_BASE_URL: http://ollama:11434
+      # DOCLING_SERVE_UNLOAD_OLLAMA_MODEL: llama3.2-vision
+
+      # External Model Unloading (llama-swap)
+      # DOCLING_SERVE_UNLOAD_LLAMA_SWAP_BASE_URL: http://llama-swap:8080
+
+      DOCLING_SERVE_UNLOAD_EXTERNAL_MODEL_TIMEOUT: 10.0
+
+      # Cache Configuration
+      DOCLING_SERVE_OPTIONS_CACHE_SIZE: 2
+
+      # Batch Processing
+      # DOCLING_SERVE_QUEUE_MAX_SIZE: 100
+      # DOCLING_SERVE_OCR_BATCH_SIZE: 8
+      # DOCLING_SERVE_LAYOUT_BATCH_SIZE: 4
+      # DOCLING_SERVE_TABLE_BATCH_SIZE: 4
+      # DOCLING_SERVE_BATCH_POLLING_INTERVAL_SECONDS: 0.1
+
+      # CORS Configuration
+      DOCLING_SERVE_CORS_ORIGINS: '["*"]'
+      DOCLING_SERVE_CORS_METHODS: '["*"]'
+      DOCLING_SERVE_CORS_HEADERS: '["*"]'
+
+      # API Security
+      # DOCLING_SERVE_API_KEY: your_secret_api_key
+
+      # Compute Engine Selection
+      DOCLING_SERVE_ENG_KIND: local  # Options: local, rq, kfp
+
+      # ========================================
+      # Docling Core Configuration
+      # ========================================
+      DOCLING_NUM_THREADS: 4
+      # DOCLING_DEVICE: cuda  # Options: cpu, cuda, mps (auto-detected if not set)
+      DOCLING_PERF_PAGE_BATCH_SIZE: 4
+      DOCLING_PERF_ELEMENTS_BATCH_SIZE: 8
+      DOCLING_DEBUG_PROFILE_PIPELINE_TIMINGS: "false"
+
+      # ========================================
+      # Compute Engine - Local
+      # ========================================
+      DOCLING_SERVE_ENG_LOC_NUM_WORKERS: 2
+      DOCLING_SERVE_ENG_LOC_SHARE_MODELS: "False"
+
+      # ========================================
+      # Compute Engine - RQ (Redis Queue)
+      # ========================================
+      # Uncomment when using RQ engine (DOCLING_SERVE_ENG_KIND=rq)
+      # DOCLING_SERVE_ENG_RQ_REDIS_URL: redis://redis:6379/0
+      # DOCLING_SERVE_ENG_RQ_RESULTS_PREFIX: docling:results
+      # DOCLING_SERVE_ENG_RQ_SUB_CHANNEL: docling:updates
+
+      # ========================================
+      # Compute Engine - KFP (Kubeflow Pipelines)
+      # ========================================
+      # Uncomment when using KFP engine (DOCLING_SERVE_ENG_KIND=kfp)
+      # DOCLING_SERVE_ENG_KFP_ENDPOINT: https://kubeflow.example.com
+      # DOCLING_SERVE_ENG_KFP_TOKEN: your_kfp_token
+      # DOCLING_SERVE_ENG_KFP_CA_CERT_PATH: /certs/ca.crt
+      # DOCLING_SERVE_ENG_KFP_SELF_CALLBACK_ENDPOINT: https://docling-serve.example.com
+      # DOCLING_SERVE_ENG_KFP_SELF_CALLBACK_TOKEN_PATH: /tokens/callback_token
+      # DOCLING_SERVE_ENG_KFP_SELF_CALLBACK_CA_CERT_PATH: /certs/callback_ca.crt
+
+      # ========================================
+      # Gradio UI Configuration
+      # ========================================
+      # GRADIO_TEMP_DIR: /opt/app-root/scratch/gradio
+
+      # ========================================
+      # System Configuration
+      # ========================================
+      OMP_NUM_THREADS: 4
+      TESSDATA_PREFIX: /usr/share/tesseract-ocr/5/tessdata/
+      HF_HUB_DOWNLOAD_TIMEOUT: 90
+      HF_HUB_ETAG_TIMEOUT: 90
+
+    ports:
+      - "5001:5001"
+
+    volumes:
+      # Persist model artifacts (downloaded from HuggingFace)
+      - docling-models:/opt/app-root/src/.cache/docling/models
+
+      # Scratch directory for temporary processing files
+      # - ./scratch:/opt/app-root/scratch
+
+      # Static assets directory (if needed)
+      # - ./static:/opt/app-root/static
+
+      # SSL certificates (if using HTTPS)
+      # - ./certs:/certs:ro
+
+      # Custom model artifacts path (if specified)
+      # - ./artifacts:/opt/app-root/artifacts:ro
+
+    restart: unless-stopped
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+    healthcheck:
+      test: ["CMD", "python3.12", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5001/health').read()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # ========================================
+  # Optional: Redis for RQ Compute Engine
+  # ========================================
+  # Uncomment this service if using RQ compute engine
+  # redis:
+  #   image: redis:7-alpine
+  #   container_name: docling-redis
+  #   ports:
+  #     - "6379:6379"
+  #   volumes:
+  #     - redis-data:/data
+  #   restart: unless-stopped
+  #   healthcheck:
+  #     test: ["CMD", "redis-cli", "ping"]
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 5
+
+  # ========================================
+  # Optional: RQ Worker
+  # ========================================
+  # Uncomment this service if using RQ compute engine
+  # rq-worker:
+  #   build:
+  #     context: .
+  #     dockerfile: Dockerfile
+  #   image: docling-serve:cuda128
+  #   container_name: docling-rq-worker
+  #   runtime: nvidia
+  #   command: ["docling-serve", "rq_worker"]
+  #   environment:
+  #     NVIDIA_VISIBLE_DEVICES: all
+  #     NVIDIA_DRIVER_CAPABILITIES: compute,utility
+  #     DOCLING_SERVE_ENG_KIND: rq
+  #     DOCLING_SERVE_ENG_RQ_REDIS_URL: redis://redis:6379/0
+  #     DOCLING_SERVE_ENG_RQ_RESULTS_PREFIX: docling:results
+  #     DOCLING_SERVE_ENG_RQ_SUB_CHANNEL: docling:updates
+  #     DOCLING_NUM_THREADS: 4
+  #     OMP_NUM_THREADS: 4
+  #   volumes:
+  #     - docling-models:/opt/app-root/src/.cache/docling/models
+  #   depends_on:
+  #     - redis
+  #   restart: unless-stopped
+  #   deploy:
+  #     resources:
+  #       reservations:
+  #         devices:
+  #           - driver: nvidia
+  #             count: all
+  #             capabilities: [gpu]
+
+volumes:
+  docling-models:
+    driver: local
+  # redis-data:
+  #   driver: local
