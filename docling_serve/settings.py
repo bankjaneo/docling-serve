@@ -55,6 +55,7 @@ class DoclingServeSettings(BaseSettings):
     unload_ollama_base_url: Optional[str] = None
     unload_ollama_model: Optional[str] = None
     unload_llama_swap_base_url: Optional[str] = None
+    unload_external_model_timeout: float = 10.0  # seconds
     enable_remote_services: bool = False
     allow_external_plugins: bool = False
     show_version_info: bool = True

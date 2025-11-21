@@ -179,19 +179,16 @@ async def unload_external_models():
     # Execute all unload tasks concurrently
     if tasks:
         _log.info(f"Unloading external models from: {', '.join([name for name, _ in tasks])}")
-        results = await asyncio.gather(*[task for _, task in tasks], return_exceptions=True)
-
-        # Log any errors (but don't raise them - unloading is best-effort)
-        for (name, _), result in zip(tasks, results):
-            if isinstance(result, Exception):
-                _log.warning(f"Failed to unload {name} models: {result}")
+        await asyncio.gather(*[task for _, task in tasks], return_exceptions=True)
 
 
 async def _unload_llama_swap(base_url: str):
     """Unload models from llama-swap by calling the /unload endpoint."""
     url = f"{base_url.rstrip('/')}/unload"
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(
+            timeout=docling_serve_settings.unload_external_model_timeout
+        ) as client:
             response = await client.get(url)
             response.raise_for_status()
             _log.info(f"Successfully unloaded llama-swap models at {base_url}")
@@ -205,7 +202,9 @@ async def _unload_ollama(base_url: str, model_name: str):
     url = f"{base_url.rstrip('/')}/api/generate"
     payload = {"model": model_name, "keep_alive": 0}
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(
+            timeout=docling_serve_settings.unload_external_model_timeout
+        ) as client:
             response = await client.post(url, json=payload)
             response.raise_for_status()
             _log.info(f"Successfully unloaded Ollama model '{model_name}' at {base_url}")
