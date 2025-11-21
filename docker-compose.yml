@@ -5,15 +5,11 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: docling-serve:cuda128
+    image: docling-serve:cuda126
     container_name: docling-serve
 
-    # NVIDIA GPU runtime configuration for CUDA 12.8
-    runtime: nvidia
-
     environment:
-      # GPU Configuration
-      NVIDIA_VISIBLE_DEVICES: all
+      # GPU Configuration (NVIDIA_VISIBLE_DEVICES is auto-managed by deploy.resources)
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
 
       # ========================================
@@ -82,6 +78,7 @@ services:
       # DOCLING_SERVE_BATCH_POLLING_INTERVAL_SECONDS: 0.1
 
       # CORS Configuration
+      # SECURITY WARNING: Wildcard (*) allows any origin. Restrict in production!
       DOCLING_SERVE_CORS_ORIGINS: '["*"]'
       DOCLING_SERVE_CORS_METHODS: '["*"]'
       DOCLING_SERVE_CORS_HEADERS: '["*"]'

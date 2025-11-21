@@ -1,11 +1,12 @@
-# Multi-stage Dockerfile for Docling Serve with CUDA 12.8 support
-# Build with: docker build --build-arg ENABLE_CUDA=true -t docling-serve:cuda128 .
+# Multi-stage Dockerfile for Docling Serve with CUDA 12.6 support
+# Build with: docker build -t docling-serve:cuda126 .
+# For CUDA 12.8, use the Containerfile: docker build --build-arg "UV_SYNC_EXTRA_ARGS=--no-group pypi --group cu128" -f Containerfile -t docling-serve:cu128 .
 
 # Stage 1: UV Builder
 FROM ghcr.io/astral-sh/uv:0.8.19 AS uv
 
 # Stage 2: Build stage
-FROM nvidia/cuda:12.8.0-runtime-ubuntu22.04 AS builder
+FROM nvidia/cuda:12.6.0-runtime-ubuntu22.04 AS builder
 
 # Install UV from first stage
 COPY --from=uv /uv /usr/local/bin/uv
@@ -50,12 +51,12 @@ RUN mkdir -p /opt/app-root/src && \
 WORKDIR /opt/app-root/src
 
 # Copy dependency files
-COPY --chown=1001:1001 pyproject.toml uv.lock README.md ./
+COPY --chown=1001:1001 pyproject.toml uv.lock ./
 
-# Install dependencies with CUDA 12.8 support
-# Use --no-group pypi --group cu128 to install CUDA 12.8 PyTorch
+# Install dependencies with CUDA 12.6 support
+# Use --no-group pypi --group cu126 to install CUDA 12.6 PyTorch
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev --no-group pypi --group cu128
+    uv sync --frozen --no-dev --no-group pypi --group cu126
 
 # Copy application code
 COPY --chown=1001:1001 docling_serve ./docling_serve
@@ -65,7 +66,7 @@ RUN --mount=type=cache,target=/root/.cache/huggingface \
     /opt/app-root/bin/python -c "from docling.models import download_models_hf; download_models_hf()" || true
 
 # Stage 3: Runtime stage
-FROM nvidia/cuda:12.8.0-runtime-ubuntu22.04 AS runtime
+FROM nvidia/cuda:12.6.0-runtime-ubuntu22.04 AS runtime
 
 # Install runtime dependencies only
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -78,7 +79,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     tesseract-ocr \
     tesseract-ocr-eng \
     libtesseract5 \
-    libleptonica-dev \
     libglvnd0 \
     libgl1 \
     libglib2.0-0 \
@@ -127,6 +127,7 @@ ENV PATH="/opt/app-root/bin:$PATH" \
     DOCLING_SERVE_CLEANUP_POLL_INTERVAL=5.0 \
     DOCLING_SERVE_UNLOAD_EXTERNAL_MODEL_TIMEOUT=10.0 \
     DOCLING_SERVE_OPTIONS_CACHE_SIZE=2 \
+    # SECURITY WARNING: Default CORS settings allow all origins. Override in production!
     DOCLING_SERVE_CORS_ORIGINS='["*"]' \
     DOCLING_SERVE_CORS_METHODS='["*"]' \
     DOCLING_SERVE_CORS_HEADERS='["*"]' \

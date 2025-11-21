@@ -1,6 +1,6 @@
 # Docker Deployment Guide
 
-This guide explains how to build and deploy Docling Serve using Docker with CUDA 12.8 support.
+This guide explains how to build and deploy Docling Serve using Docker with CUDA support (12.6/12.8).
 
 ## Prerequisites
 
@@ -24,7 +24,7 @@ sudo systemctl restart docker
 
 Verify GPU access:
 ```bash
-docker run --rm --gpus all nvidia/cuda:12.8.0-base-ubuntu22.04 nvidia-smi
+docker run --rm --gpus all nvidia/cuda:12.6.0-base-ubuntu22.04 nvidia-smi
 ```
 
 ## Quick Start
@@ -32,8 +32,12 @@ docker run --rm --gpus all nvidia/cuda:12.8.0-base-ubuntu22.04 nvidia-smi
 ### 1. Build the Docker Image
 
 ```bash
-# Build with CUDA 12.8 support
-docker build -t docling-serve:cuda128 .
+# Build with CUDA 12.6 support (using Dockerfile)
+docker build -t docling-serve:cuda126 .
+
+# Or build with CUDA 12.8 support (using Containerfile)
+docker build --build-arg "UV_SYNC_EXTRA_ARGS=--no-group pypi --group cu128" \
+  -f Containerfile -t docling-serve:cuda128 .
 ```
 
 ### 2. Run with Docker Compose
@@ -54,13 +58,11 @@ docker compose down
 ```bash
 docker run -d \
   --name docling-serve \
-  --runtime=nvidia \
   --gpus all \
-  -e NVIDIA_VISIBLE_DEVICES=all \
   -e NVIDIA_DRIVER_CAPABILITIES=compute,utility \
   -p 5001:5001 \
   -v docling-models:/opt/app-root/src/.cache/docling/models \
-  docling-serve:cuda128
+  docling-serve:cuda126
 ```
 
 ## Testing the Deployment
@@ -72,8 +74,11 @@ curl http://localhost:5001/health
 # Check version info
 curl http://localhost:5001/version
 
-# View API documentation
-open http://localhost:5001/docs
+# View API documentation in browser
+# macOS: open http://localhost:5001/docs
+# Linux: xdg-open http://localhost:5001/docs
+# Windows: start http://localhost:5001/docs
+# Or simply navigate to: http://localhost:5001/docs
 ```
 
 ## Configuration
@@ -220,7 +225,7 @@ deploy:
 
 ```bash
 # Check NVIDIA runtime
-docker run --rm --gpus all nvidia/cuda:12.8.0-base-ubuntu22.04 nvidia-smi
+docker run --rm --gpus all nvidia/cuda:12.6.0-base-ubuntu22.04 nvidia-smi
 
 # Check Docker daemon configuration
 cat /etc/docker/daemon.json
