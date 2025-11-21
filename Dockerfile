@@ -5,7 +5,7 @@
 FROM ghcr.io/astral-sh/uv:0.8.19 AS uv
 
 # Stage 2: Build stage
-FROM nvidia/cuda:12.8.0-runtime-ubuntu22.04 AS builder
+FROM nvidia/cuda:12.8.0-runtime-ubuntu24.04 AS builder
 
 # Install UV from first stage
 COPY --from=uv /uv /usr/local/bin/uv
@@ -65,7 +65,7 @@ RUN --mount=type=cache,target=/root/.cache/huggingface \
     /opt/app-root/bin/python -c "from docling.models import download_models_hf; download_models_hf()" || true
 
 # Stage 3: Runtime stage
-FROM nvidia/cuda:12.8.0-runtime-ubuntu22.04 AS runtime
+FROM nvidia/cuda:12.8.0-runtime-ubuntu24.04 AS runtime
 
 # Install runtime dependencies only
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -100,7 +100,7 @@ WORKDIR /opt/app-root/src
 
 # Set runtime environment variables with defaults from docs/configuration.md
 ENV PATH="/opt/app-root/bin:$PATH" \
-    PYTHONPATH="/opt/app-root/src:$PYTHONPATH" \
+    PYTHONPATH="/opt/app-root/src" \
     OMP_NUM_THREADS=4 \
     TESSDATA_PREFIX=/usr/share/tesseract-ocr/5/tessdata/ \
     # Uvicorn Web Server Configuration

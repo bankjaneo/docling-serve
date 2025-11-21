@@ -24,7 +24,7 @@ sudo systemctl restart docker
 
 Verify GPU access:
 ```bash
-docker run --rm --gpus all nvidia/cuda:12.8.0-base-ubuntu22.04 nvidia-smi
+docker run --rm --gpus all nvidia/cuda:12.8.0-base-ubuntu24.04 nvidia-smi
 ```
 
 ## Quick Start
@@ -221,7 +221,7 @@ deploy:
 
 ```bash
 # Check NVIDIA runtime
-docker run --rm --gpus all nvidia/cuda:12.8.0-base-ubuntu22.04 nvidia-smi
+docker run --rm --gpus all nvidia/cuda:12.8.0-base-ubuntu24.04 nvidia-smi
 
 # Check Docker daemon configuration
 cat /etc/docker/daemon.json
