@@ -52,6 +52,9 @@ THe following table describes the options to configure the Docling Serve app.
 |  | `DOCLING_SERVE_LOAD_MODELS_AT_BOOT` | `True` | If enabled, the models for the default options will be loaded at boot. |
 |  | `DOCLING_SERVE_FREE_VRAM_ON_IDLE` | `False` | If enabled, OCR models are loaded only before processing and unloaded after completion to free VRAM. Useful for low VRAM systems and Docker deployments. When enabled, `LOAD_MODELS_AT_BOOT` is automatically disabled. |
 |  | `DOCLING_SERVE_CLEANUP_POLL_INTERVAL` | `5.0` | Polling interval (in seconds) for checking task completion when `FREE_VRAM_ON_IDLE` is enabled. The background cleanup task checks at this interval whether a task has finished before unloading models. |
+|  | `DOCLING_SERVE_UNLOAD_OLLAMA_BASE_URL` | unset | Optional: URL of Ollama API (e.g., `http://localhost:11434`). When set with `FREE_VRAM_ON_IDLE=True`, Docling will unload Ollama models before loading its own models. Useful for systems with low VRAM that integrate Docling with Open WebUI or other Ollama-based applications. |
+|  | `DOCLING_SERVE_UNLOAD_OLLAMA_MODEL` | unset | Optional: Name of the Ollama model to unload (e.g., `llama3.2`). Required if `UNLOAD_OLLAMA_BASE_URL` is set. |
+|  | `DOCLING_SERVE_UNLOAD_LLAMA_SWAP_BASE_URL` | unset | Optional: URL of llama-swap API (e.g., `http://localhost:9292`). When set with `FREE_VRAM_ON_IDLE=True`, Docling will unload llama.cpp models before loading its own models. Useful for systems with low VRAM. |
 |  | `DOCLING_SERVE_OPTIONS_CACHE_SIZE` | `2` | How many DocumentConveter objects (including their loaded models) to keep in the cache. |
 |  | `DOCLING_SERVE_QUEUE_MAX_SIZE` | | Size of the pages queue. Potentially so many pages opened at the same time. |
 |  | `DOCLING_SERVE_OCR_BATCH_SIZE` | | Batch size for the OCR stage. |
@@ -120,3 +123,79 @@ When using Gradio UI and using the option to output conversion as file, Gradio u
 
 - Increase the older age of files to clean [here](https://github.com/docling-project/docling-serve/blob/main/docling_serve/gradio_ui.py#L483) to suffice the age desired;
 - Or set the clean up manually by defining the temporary dir of Gradio to use the same as `DOCLING_SERVE_SCRATCH_PATH` absolute path. This can be achieved by setting the environment variable `GRADIO_TEMP_DIR`, that can be done via command line `export GRADIO_TEMP_DIR="<same_path_as_scratch>"` or in `Dockerfile` using `ENV GRADIO_TEMP_DIR="<same_path_as_scratch>"`. After this, set the clean of cache to `None` [here](https://github.com/docling-project/docling-serve/blob/main/docling_serve/gradio_ui.py#L483). Now, the clean up of `DOCLING_SERVE_SCRATCH_PATH` will also clean the Gradio temporary dir. (If you use this option, please remember when reversing changes to remove the environment variable `GRADIO_TEMP_DIR`, otherwise may lead to files not be available to download).
+
+### External Model Unloading for Low VRAM Systems
+
+For systems with limited VRAM that need to run Docling alongside other applications (like Open WebUI with Ollama, or llama.cpp via llama-swap), you can configure Docling to automatically unload external models before loading its own models.
+
+This feature is designed for scenarios where:
+- You're running Docling in Docker with Open WebUI or similar applications
+- Your system has limited VRAM and needs to swap models between applications
+- You want to integrate Docling as a document processing service alongside LLM inference
+
+#### Using with Ollama
+
+To unload Ollama models before Docling processing:
+
+```bash
+export DOCLING_SERVE_FREE_VRAM_ON_IDLE=true
+export DOCLING_SERVE_UNLOAD_OLLAMA_BASE_URL=http://localhost:11434
+export DOCLING_SERVE_UNLOAD_OLLAMA_MODEL=llama3.2
+```
+
+Or in your `.env` file:
+```
+DOCLING_SERVE_FREE_VRAM_ON_IDLE=true
+DOCLING_SERVE_UNLOAD_OLLAMA_BASE_URL=http://localhost:11434
+DOCLING_SERVE_UNLOAD_OLLAMA_MODEL=llama3.2
+```
+
+Or in Docker Compose:
+```yaml
+services:
+  docling-serve:
+    image: docling-serve:latest
+    environment:
+      - DOCLING_SERVE_FREE_VRAM_ON_IDLE=true
+      - DOCLING_SERVE_UNLOAD_OLLAMA_BASE_URL=http://ollama:11434
+      - DOCLING_SERVE_UNLOAD_OLLAMA_MODEL=llama3.2
+```
+
+#### Using with llama-swap
+
+To unload llama.cpp models via llama-swap:
+
+```bash
+export DOCLING_SERVE_FREE_VRAM_ON_IDLE=true
+export DOCLING_SERVE_UNLOAD_LLAMA_SWAP_BASE_URL=http://localhost:9292
+```
+
+Or in your `.env` file:
+```
+DOCLING_SERVE_FREE_VRAM_ON_IDLE=true
+DOCLING_SERVE_UNLOAD_LLAMA_SWAP_BASE_URL=http://localhost:9292
+```
+
+#### Using Both Services
+
+You can configure both Ollama and llama-swap unloading simultaneously:
+
+```bash
+export DOCLING_SERVE_FREE_VRAM_ON_IDLE=true
+export DOCLING_SERVE_UNLOAD_OLLAMA_BASE_URL=http://localhost:11434
+export DOCLING_SERVE_UNLOAD_OLLAMA_MODEL=llama3.2
+export DOCLING_SERVE_UNLOAD_LLAMA_SWAP_BASE_URL=http://localhost:9292
+```
+
+#### How It Works
+
+When `FREE_VRAM_ON_IDLE=true` is enabled:
+1. Before each document processing job, Docling will:
+   - Call the configured external services to unload their models from VRAM
+   - Load Docling's OCR and document processing models
+   - Process the document
+   - Unload Docling's models to free VRAM
+
+This allows different applications to share limited VRAM by coordinating model loading/unloading.
+
+**Note:** External model unloading is optional and non-blocking. If the external service is unavailable or returns an error, Docling will log a warning but continue with document processing.
