@@ -48,6 +48,7 @@ class DoclingServeSettings(BaseSettings):
     result_removal_delay: float = 300  # 5 minutes
     load_models_at_boot: bool = True
     free_vram_on_idle: bool = False
+    cleanup_poll_interval: float = 5.0  # seconds
     options_cache_size: int = 2
     enable_remote_services: bool = False
     allow_external_plugins: bool = False

@@ -178,12 +178,18 @@ async def cleanup_models_background(orchestrator: BaseOrchestrator, task_id: str
     start_time = time.monotonic()
 
     while time.monotonic() - start_time < max_wait_time:
-        task = await orchestrator.task_status(task_id=task_id)
-        if task and task.task_status in [TaskStatus.SUCCESS, TaskStatus.FAILURE]:
-            # Task completed, now cleanup models
-            await cleanup_models_if_needed(orchestrator)
+        try:
+            task = await orchestrator.task_status(task_id=task_id)
+            if task and task.task_status in [TaskStatus.SUCCESS, TaskStatus.FAILURE]:
+                # Task completed, now cleanup models
+                await cleanup_models_if_needed(orchestrator)
+                return
+        except TaskNotFoundError:
+            _log.warning(f"Task {task_id} not found during model cleanup. Stopping cleanup task.")
             return
-        await asyncio.sleep(5)  # Check every 5 seconds
+        await asyncio.sleep(docling_serve_settings.cleanup_poll_interval)
+
+    _log.warning(f"Cleanup task for task {task_id} timed out after {max_wait_time} seconds.")
 
 
 ##################################
