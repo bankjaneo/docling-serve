@@ -312,14 +312,35 @@ async def cleanup_models_if_needed(orchestrator: BaseOrchestrator):
                             pass
 
                 # Force all CUDA tensors to be moved to CPU and deleted
-                for obj_id in list(torch.cuda.memory._allocated_objects()):
-                    try:
-                        obj = torch.cuda.memory._allocated_objects[obj_id]
-                        if hasattr(obj, 'cpu'):
-                            obj = obj.cpu()
-                            del obj
-                    except Exception:
-                        pass
+                # Use a more robust approach that works across PyTorch versions
+                try:
+                    # Method 1: Try to access allocated objects if available
+                    if hasattr(torch.cuda.memory, '_allocated_objects'):
+                        for obj_id in list(torch.cuda.memory._allocated_objects()):
+                            try:
+                                obj = torch.cuda.memory._allocated_objects[obj_id]
+                                if hasattr(obj, 'cpu'):
+                                    obj = obj.cpu()
+                                    del obj
+                            except Exception:
+                                pass
+                    else:
+                        # Method 2: Alternative approach - force memory cleanup through garbage collection
+                        import gc
+                        gc.collect()
+
+                        # Method 3: Try to force cleanup by creating and destroying tensors
+                        for device_id in range(torch.cuda.device_count()):
+                            try:
+                                with torch.cuda.device(device_id):
+                                    # Create a small tensor to trigger any lazy operations
+                                    temp_tensor = torch.tensor([1.0], device=f'cuda:{device_id}')
+                                    del temp_tensor
+                                    torch.cuda.empty_cache()
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
         except Exception as e:
             _log.warning(f"Failed to move models to CPU: {e}")
 
@@ -385,15 +406,36 @@ async def cleanup_models_if_needed(orchestrator: BaseOrchestrator):
             if 'CUDAExecutionProvider' in providers:
                 _log.info("ONNX Runtime CUDA provider detected, forcing cleanup...")
 
-                # More aggressive ONNX Runtime cleanup approach
+                # EXTREMELY aggressive ONNX Runtime cleanup approach
                 # Clear any provider options and recreate sessions
-                ort.capi._pybind_state.clear_session_pools()
-
-                # Trick: Creating and immediately destroying a session sometimes triggers
-                # ONNX Runtime to release cached CUDA allocations
                 try:
-                    dummy_session = ort.InferenceSession(''.encode(), providers=['CPUExecutionProvider'])
-                    del dummy_session
+                    ort.capi._pybind_state.clear_session_pools()
+                except Exception:
+                    pass
+
+                # Try to clear all cached sessions and providers
+                try:
+                    # Force release of all CUDA memory pools in ONNX Runtime
+                    if hasattr(ort, 'get_device') and hasattr(ort, 'set_default_logger_severity'):
+                        # Try to force device reset (if available)
+                        ort.set_default_logger_severity(3)  # ERROR level to reduce noise
+                except Exception:
+                    pass
+
+                # Multiple dummy sessions to trigger cleanup
+                for _ in range(3):
+                    try:
+                        dummy_session = ort.InferenceSession(''.encode(), providers=['CPUExecutionProvider'])
+                        del dummy_session
+                        gc.collect()
+                    except Exception:
+                        pass
+
+                # Try to force CUDA provider cleanup specifically
+                try:
+                    # Create CUDA session and immediately delete it to force cleanup
+                    cuda_session = ort.InferenceSession(''.encode(), providers=['CUDAExecutionProvider'])
+                    del cuda_session
                 except Exception:
                     pass
 
@@ -457,7 +499,36 @@ async def cleanup_models_if_needed(orchestrator: BaseOrchestrator):
                 torch.cuda.empty_cache()
                 torch.cuda.synchronize()
 
-                # Step 6g: Clear CUDA context if possible (advanced technique)
+                # Step 6g: Nuclear option - completely reset CUDA contexts if memory is still high
+                mem_allocated = torch.cuda.memory_allocated() / 1024**2
+                mem_reserved = torch.cuda.memory_reserved() / 1024**2
+
+                # If more than 200MB is still allocated, try nuclear cleanup
+                if mem_reserved > 200:
+                    _log.warning(f"High VRAM usage detected ({mem_reserved:.2f} MB), attempting nuclear cleanup...")
+                    try:
+                        # Nuclear option: Reset all CUDA devices
+                        for device_id in range(device_count):
+                            with torch.cuda.device(device_id):
+                                # Force device reset (this will destroy the CUDA context)
+                                try:
+                                    torch.cuda.reset_device()
+                                except Exception:
+                                    pass
+
+                                # Try to force device synchronization and reset
+                                torch.cuda.synchronize()
+                                torch.cuda.empty_cache()
+
+                        # Final global cleanup
+                        torch.cuda.empty_cache()
+                        torch.cuda.synchronize()
+
+                        _log.info("Nuclear CUDA cleanup completed")
+                    except Exception as e:
+                        _log.warning(f"Nuclear cleanup failed: {e}")
+
+                # Step 6h: Clear CUDA context if possible (advanced technique)
                 try:
                     # Force CUDA context reset by creating and destroying a tensor
                     for device_id in range(device_count):
@@ -468,7 +539,7 @@ async def cleanup_models_if_needed(orchestrator: BaseOrchestrator):
                 except Exception:
                     pass
 
-                # Step 6h: Final memory state reporting
+                # Step 6i: Final memory state reporting
                 mem_after = torch.cuda.memory_allocated() / 1024**2
                 mem_reserved = torch.cuda.memory_reserved() / 1024**2
                 mem_total = torch.cuda.get_device_properties(0).total_memory / 1024**2
@@ -478,12 +549,39 @@ async def cleanup_models_if_needed(orchestrator: BaseOrchestrator):
                 _log.info(f"Total VRAM: {mem_total:.2f} MB")
                 _log.info("Enhanced CUDA cache cleared and synchronized")
 
-                # Step 6i: Memory usage analysis
+                # Step 6j: Memory usage analysis with stricter thresholds
                 vram_usage_percent = (mem_reserved / mem_total) * 100
-                if vram_usage_percent > 5:
-                    _log.warning(f"VRAM usage is still {vram_usage_percent:.1f}% ({mem_reserved:.2f} MB) - this may indicate CUDA context overhead or memory leaks")
+                global _vram_cleanup_failures, _child_process_fallback_activated
+
+                if vram_usage_percent > 10:  # Stricter threshold
+                    _vram_cleanup_failures += 1
+                    _log.error(f"VRAM cleanup FAILED: {vram_usage_percent:.1f}% ({mem_reserved:.2f} MB) still in use")
+                    _log.error(f"This is failure #{_vram_cleanup_failures}")
+                    _log.error("This indicates persistent memory leaks or CUDA context issues")
+
+                    # Auto-fallback to child processes if enabled and threshold reached
+                    if (not _child_process_fallback_activated and
+                        docling_serve_settings.auto_enable_child_processes_on_cleanup_failure and
+                        _vram_cleanup_failures >= 2):
+
+                        _log.warning("Auto-enabling child process OCR due to repeated VRAM cleanup failures")
+                        _child_process_fallback_activated = True
+                        try:
+                            ocr_manager = get_ocr_process_manager()
+                            ocr_manager.start_workers()
+                            _log.info("Child process OCR enabled successfully as fallback")
+                        except Exception as e:
+                            _log.error(f"Failed to enable child process OCR fallback: {e}")
+
+                    _log.error("Consider using child process OCR approach for complete memory isolation")
+
+                elif vram_usage_percent > 5:
+                    _log.warning(f"VRAM usage is still {vram_usage_percent:.1f}% ({mem_reserved:.2f} MB) - this may indicate CUDA context overhead")
                 else:
                     _log.info(f"VRAM cleanup successful: {vram_usage_percent:.1f}% usage remaining")
+                    # Reset failure counter on successful cleanup
+                    if _vram_cleanup_failures > 0:
+                        _vram_cleanup_failures = max(0, _vram_cleanup_failures - 1)
 
         except Exception as e:
             _log.warning(f"Failed to clear CUDA cache: {e}")
@@ -797,6 +895,10 @@ class OCRProcessManager:
 
 # Global OCR process manager instance (will be initialized in lifespan)
 _ocr_process_manager: OCRProcessManager | None = None
+
+# Track VRAM cleanup failures for auto-fallback
+_vram_cleanup_failures: int = 0
+_child_process_fallback_activated: bool = False
 
 
 def get_ocr_process_manager() -> OCRProcessManager:
@@ -1786,5 +1888,132 @@ def create_app():  # noqa: C901
     ):
         await orchestrator.clear_results(older_than=older_then)
         return ClearResponse()
+
+    # Force VRAM cleanup (for debugging and manual cleanup)
+    @app.get(
+        "/v1/clear/vram",
+        tags=["clear"],
+        response_model=dict,
+    )
+    async def force_vram_cleanup(
+        auth: Annotated[AuthenticationResult, Depends(require_auth)],
+        orchestrator: Annotated[BaseOrchestrator, Depends(get_async_orchestrator)],
+    ):
+        """
+        Force immediate VRAM cleanup. Useful for debugging memory issues or manual cleanup.
+        """
+        global _vram_cleanup_failures, _child_process_fallback_activated
+
+        # Get VRAM status before cleanup
+        vram_before = {}
+        try:
+            import torch
+            if torch.cuda.is_available():
+                vram_before = {
+                    "allocated": torch.cuda.memory_allocated() / 1024**2,
+                    "reserved": torch.cuda.memory_reserved() / 1024**2,
+                    "total": torch.cuda.get_device_properties(0).total_memory / 1024**2,
+                    "cleanup_failures": _vram_cleanup_failures,
+                    "child_process_fallback": _child_process_fallback_activated
+                }
+        except Exception:
+            pass
+
+        # Force immediate cleanup
+        await cleanup_models_if_needed(orchestrator)
+
+        # Get VRAM status after cleanup
+        vram_after = {}
+        try:
+            import torch
+            if torch.cuda.is_available():
+                vram_after = {
+                    "allocated": torch.cuda.memory_allocated() / 1024**2,
+                    "reserved": torch.cuda.memory_reserved() / 1024**2,
+                    "total": torch.cuda.get_device_properties(0).total_memory / 1024**2,
+                    "cleanup_failures": _vram_cleanup_failures,
+                    "child_process_fallback": _child_process_fallback_activated
+                }
+        except Exception:
+            pass
+
+        return {
+            "status": "completed",
+            "vram_before": vram_before,
+            "vram_after": vram_after,
+            "memory_freed_mb": vram_before.get("reserved", 0) - vram_after.get("reserved", 0)
+        }
+
+    # Get VRAM status
+    @app.get(
+        "/v1/status/vram",
+        tags=["status"],
+        response_model=dict,
+    )
+    async def get_vram_status():
+        """
+        Get current VRAM usage and system status.
+        """
+        global _vram_cleanup_failures, _child_process_fallback_activated
+
+        status = {
+            "cuda_available": False,
+            "vram_info": {},
+            "cleanup_failures": _vram_cleanup_failures,
+            "child_process_fallback": _child_process_fallback_activated,
+            "settings": {
+                "free_vram_on_idle": docling_serve_settings.free_vram_on_idle,
+                "use_ocr_worker_processes": docling_serve_settings.use_ocr_worker_processes,
+                "auto_enable_child_processes_on_cleanup_failure": docling_serve_settings.auto_enable_child_processes_on_cleanup_failure,
+                "vram_cleanup_failure_threshold": docling_serve_settings.vram_cleanup_failure_threshold
+            }
+        }
+
+        try:
+            import torch
+            if torch.cuda.is_available():
+                status["cuda_available"] = True
+                device_count = torch.cuda.device_count()
+
+                for device_id in range(device_count):
+                    props = torch.cuda.get_device_properties(device_id)
+                    status["vram_info"][f"device_{device_id}"] = {
+                        "name": props.name,
+                        "total_memory_mb": props.total_memory / 1024**2,
+                        "allocated_memory_mb": torch.cuda.memory_allocated(device_id) / 1024**2,
+                        "reserved_memory_mb": torch.cuda.memory_reserved(device_id) / 1024**2,
+                        "utilization_percent": (torch.cuda.memory_reserved(device_id) / props.total_memory) * 100
+                    }
+
+                # Overall status
+                total_allocated = sum(torch.cuda.memory_allocated(device_id) for device_id in range(device_count)) / 1024**2
+                total_reserved = sum(torch.cuda.memory_reserved(device_id) for device_id in range(device_count)) / 1024**2
+
+                status["vram_info"]["overall"] = {
+                    "total_allocated_mb": total_allocated,
+                    "total_reserved_mb": total_reserved,
+                    "device_count": device_count
+                }
+
+                # Health assessment
+                if device_count > 0:
+                    total_memory = torch.cuda.get_device_properties(0).total_memory / 1024**2
+                    utilization_percent = (total_reserved / total_memory) * 100
+
+                    if utilization_percent > 20:
+                        status["health"] = "critical"
+                        status["recommendation"] = "Consider restarting the service or enabling child process OCR"
+                    elif utilization_percent > 10:
+                        status["health"] = "warning"
+                        status["recommendation"] = "Monitor VRAM usage closely"
+                    else:
+                        status["health"] = "healthy"
+                        status["recommendation"] = "VRAM usage is normal"
+
+        except Exception as e:
+            status["error"] = str(e)
+            status["health"] = "unknown"
+
+        return status
 
     return app

@@ -73,6 +73,10 @@ class DoclingServeSettings(BaseSettings):
     ocr_worker_processes: int = 1
     ocr_process_timeout: int = 300  # seconds
 
+    # Auto-fallback to child processes if VRAM cleanup fails
+    auto_enable_child_processes_on_cleanup_failure: bool = False
+    vram_cleanup_failure_threshold: float = 10.0  # percentage
+
     api_key: str = ""
 
     max_document_timeout: float = 3_600 * 24 * 7  # 7 days
