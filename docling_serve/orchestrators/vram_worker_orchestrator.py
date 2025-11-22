@@ -106,13 +106,16 @@ def _worker_process_entry(
         # Create a minimal PDF format option object with all required attributes
         class MinimalPdfFormatOption:
             def __init__(self, backend=PdfBackend.DLPARSE_V4):
+                # Add __name__ attribute to the backend since docling expects it
+                if not hasattr(backend, '__name__'):
+                    backend.__name__ = backend.name.lower()
                 self.backend = backend
                 self.pipeline_options = None
                 self.pipeline_cls = None  # Required by the hash function
 
             def model_dump(self, serialize_as_any=True):
                 return {
-                    "backend": self.backend.value,
+                    "backend": self.backend,
                     "pipeline_options": self.pipeline_options,
                     "pipeline_cls": self.pipeline_cls
                 }
