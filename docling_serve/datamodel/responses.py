@@ -16,6 +16,18 @@ from docling_jobkit.datamodel.task_meta import TaskProcessingMeta, TaskType
 # Status
 class HealthCheckResponse(BaseModel):
     status: str = "ok"
+    memory_usage: Optional[dict] = None  # Memory usage information
+
+
+class MemoryUsageResponse(BaseModel):
+    """Memory usage information for monitoring."""
+    vram_allocated_mb: Optional[float] = None
+    vram_reserved_mb: Optional[float] = None
+    vram_total_mb: Optional[float] = None
+    system_memory_mb: Optional[float] = None
+    cleanup_enabled: bool = False
+    last_cleanup: Optional[str] = None
+    device_info: Optional[dict] = None
 
 
 class ClearResponse(BaseModel):

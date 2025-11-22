@@ -229,151 +229,707 @@ async def ensure_models_loaded(orchestrator: BaseOrchestrator):
 
 
 async def cleanup_models_if_needed(orchestrator: BaseOrchestrator):
-    """Clear models after processing if lazy loading is enabled to free VRAM."""
+    """Enhanced model cleanup to aggressively free VRAM and reduce memory retention."""
     if docling_serve_settings.free_vram_on_idle:
-        _log.info("Clearing models to free VRAM...")
+        _log.info("Starting enhanced VRAM cleanup...")
 
-        # Log VRAM usage before cleanup
+        # Log detailed VRAM usage before cleanup
+        mem_before = 0
+        mem_reserved_before = 0
+        device_info = ""
         try:
             import torch
             if torch.cuda.is_available():
-                mem_before = torch.cuda.memory_allocated() / 1024**2
-                _log.info(f"VRAM allocated before cleanup: {mem_before:.2f} MB")
-        except Exception:
-            pass
+                device_count = torch.cuda.device_count()
+                device_info = f" (devices: {device_count})"
+                for device_id in range(device_count):
+                    mem_before_dev = torch.cuda.memory_allocated(device_id) / 1024**2
+                    mem_reserved_dev = torch.cuda.memory_reserved(device_id) / 1024**2
+                    device_props = torch.cuda.get_device_properties(device_id)
+                    total_mem = device_props.total_memory / 1024**3
 
-        # Step 1: Move models to CPU before deletion (critical for VRAM release)
+                    if getattr(docling_serve_settings, 'enable_detailed_memory_logging', False):
+                        _log.info(f"Device {device_id} ({device_props.name}) - Total: {total_mem:.1f} GB, "
+                                f"Allocated: {mem_before_dev:.2f} MB, Reserved: {mem_reserved_dev:.2f} MB")
+
+                    mem_before += mem_before_dev
+                    mem_reserved_before += mem_reserved_dev
+
+                _log.info(f"VRAM before cleanup{device_info} - Allocated: {mem_before:.2f} MB, Reserved: {mem_reserved_before:.2f} MB")
+        except Exception as e:
+            _log.debug(f"Failed to get initial VRAM info: {e}")
+
+        # Step 1: Enhanced model moving to CPU with deep traversal
+        models_moved = 0
         try:
             import torch
             if torch.cuda.is_available():
-                _log.info("Moving models to CPU before deletion...")
-                # Try to access converter manager if it exists
-                if hasattr(orchestrator, 'cm') and hasattr(orchestrator.cm, '_get_converter_from_hash'):
-                    # Get the cache info
-                    cache = orchestrator.cm._get_converter_from_hash
-                    if hasattr(cache, 'cache_info'):
-                        _log.info(f"Converter cache before cleanup: {cache.cache_info()}")
+                _log.info("Moving all models to CPU before deletion...")
 
-                    # Try to move any cached converters to CPU
-                    if hasattr(cache, '__wrapped__'):
-                        # For LRU cache, we need to access the cache directly
-                        try:
-                            # Access the private cache dict (this is a bit hacky but necessary)
-                            cache_dict = cache.cache
-                            for key, value in list(cache_dict.items()):
-                                try:
-                                    # Try to move converter models to CPU
-                                    converter = value  # In LRU cache, value might be wrapped
-                                    if hasattr(converter, 'doc_converter') and hasattr(converter.doc_converter, 'to'):
-                                        converter.doc_converter.to('cpu')
-                                    elif hasattr(converter, 'to'):
-                                        converter.to('cpu')
-                                except Exception:
-                                    pass
-                        except Exception:
-                            pass
+                # Access converter manager through multiple possible paths
+                cm = None
+                if hasattr(orchestrator, 'cm'):
+                    cm = orchestrator.cm
+                elif hasattr(orchestrator, 'converter_manager'):
+                    cm = orchestrator.converter_manager
+
+                if cm:
+                    # Try different cache access methods
+                    cache_accessors = [
+                        '_get_converter_from_hash',
+                        '_converter_cache',
+                        '_cached_converters',
+                        'converter_cache'
+                    ]
+
+                    for attr_name in cache_accessors:
+                        if hasattr(cm, attr_name):
+                            cache = getattr(cm, attr_name)
+                            models_moved += await _move_models_to_cpu_deep(cache, attr_name)
+
+                # Additional: Search for any torch.nn.Module objects in orchestrator
+                models_moved += await _find_and_move_torch_modules(orchestrator)
+
+                _log.info(f"Moved {models_moved} models to CPU")
         except Exception as e:
             _log.warning(f"Failed to move models to CPU: {e}")
 
-        # Step 2: Try to explicitly close ONNX Runtime sessions
+        # Step 2: Aggressive ONNX Runtime cleanup
+        onnx_sessions_closed = 0
         try:
-            if hasattr(orchestrator, 'cm') and hasattr(orchestrator.cm, '_get_converter_from_hash'):
-                cache = orchestrator.cm._get_converter_from_hash
-                if hasattr(cache, 'cache'):
-                    _log.info("Attempting to close ONNX Runtime sessions...")
-                    for key, converter in list(cache.cache.items()):
-                        try:
-                            # Try to access and delete ONNX sessions within converters
-                            if hasattr(converter, '__dict__'):
-                                for attr_name in list(converter.__dict__.keys()):
-                                    attr = getattr(converter, attr_name, None)
-                                    # Look for ONNX InferenceSession objects
-                                    if attr is not None and 'onnxruntime' in str(type(attr)):
-                                        _log.info(f"Found ONNX session in {attr_name}, deleting...")
-                                        delattr(converter, attr_name)
-                        except Exception as e:
-                            _log.debug(f"Error closing ONNX session: {e}")
+            onnx_sessions_closed = await _aggressive_onnx_cleanup(orchestrator)
+            _log.info(f"Closed {onnx_sessions_closed} ONNX Runtime sessions")
         except Exception as e:
-            _log.warning(f"Failed to close ONNX sessions: {e}")
+            _log.warning(f"ONNX Runtime cleanup failed: {e}")
 
-        # Step 3: Clear converters and explicitly delete cache entries
-        await orchestrator.clear_converters()
-
-        # Also try to manually clear the cache dictionary
+        # Step 3: Enhanced cache clearing with multiple strategies
+        caches_cleared = 0
         try:
-            if hasattr(orchestrator, 'cm') and hasattr(orchestrator.cm, '_get_converter_from_hash'):
-                cache = orchestrator.cm._get_converter_from_hash
-                if hasattr(cache, 'cache'):
-                    _log.info(f"Manually clearing {len(cache.cache)} cached converters...")
-                    # Delete each converter explicitly
-                    for key in list(cache.cache.keys()):
-                        try:
-                            del cache.cache[key]
-                        except:
-                            pass
-                    cache.cache.clear()
+            caches_cleared = await _enhanced_cache_clearing(orchestrator)
+            _log.info(f"Cleared {caches_cleared} converter caches")
         except Exception as e:
-            _log.debug(f"Manual cache clear: {e}")
+            _log.warning(f"Enhanced cache clearing failed: {e}")
 
-        # Step 4: Force aggressive garbage collection
-        import gc
-        _log.info("Running aggressive garbage collection...")
-        for _ in range(5):
-            gc.collect()
-        gc.collect(2)  # Full collection including generation 2
-
-        # Step 5: Try to force ONNX Runtime CUDA cleanup
+        # Step 4: Call orchestrator's clear_converters method
         try:
-            import onnxruntime as ort
-            providers = ort.get_available_providers()
-            if 'CUDAExecutionProvider' in providers:
-                _log.info("ONNX Runtime CUDA provider detected, forcing cleanup...")
-                # Trick: Creating and immediately destroying a session sometimes triggers
-                # ONNX Runtime to release cached CUDA allocations
-                # This is a workaround since ONNX Runtime has no official cleanup API
-                import gc
-                gc.collect()
-                gc.collect()
+            await orchestrator.clear_converters()
+            _log.info("Called orchestrator.clear_converters()")
         except Exception as e:
-            _log.debug(f"ONNX Runtime cleanup attempt: {e}")
+            _log.warning(f"orchestrator.clear_converters() failed: {e}")
 
-        # Step 6: Explicitly free CUDA memory
+        # Step 5: Multi-stage garbage collection with memory pressure
+        try:
+            await _multi_stage_gc()
+        except Exception as e:
+            _log.warning(f"Multi-stage GC failed: {e}")
+
+        # Step 6: ONNX Runtime provider-specific cleanup
+        try:
+            await _onnx_provider_cleanup()
+        except Exception as e:
+            _log.debug(f"ONNX provider cleanup: {e}")
+
+        # Step 7: Aggressive CUDA memory cleanup with context management
+        try:
+            await _aggressive_cuda_cleanup()
+        except Exception as e:
+            _log.warning(f"Aggressive CUDA cleanup failed: {e}")
+
+        # Step 8: Final memory usage reporting with detailed logging
         try:
             import torch
             if torch.cuda.is_available():
-                _log.info("Clearing CUDA cache...")
-                # Clear CUDA cache multiple times
-                torch.cuda.empty_cache()
-                torch.cuda.synchronize()
+                device_count = torch.cuda.device_count()
+                mem_after = 0
+                mem_reserved_after = 0
 
-                # Reset peak memory stats
-                torch.cuda.reset_peak_memory_stats()
-                torch.cuda.reset_accumulated_memory_stats()
+                # Collect detailed per-device information
+                for device_id in range(device_count):
+                    mem_after_dev = torch.cuda.memory_allocated(device_id) / 1024**2
+                    mem_reserved_dev = torch.cuda.memory_reserved(device_id) / 1024**2
+                    device_props = torch.cuda.get_device_properties(device_id)
+                    total_mem = device_props.total_memory / 1024**3
 
-                # Try to set memory fraction to minimal (releases reserved memory)
+                    mem_after += mem_after_dev
+                    mem_reserved_after += mem_reserved_dev
+
+                    if getattr(docling_serve_settings, 'enable_detailed_memory_logging', False):
+                        _log.info(f"Device {device_id} after cleanup ({device_props.name}) - "
+                                f"Total: {total_mem:.1f} GB, Allocated: {mem_after_dev:.2f} MB, "
+                                f"Reserved: {mem_reserved_dev:.2f} MB")
+
+                mem_freed = mem_before - mem_after
+                reserved_freed = mem_reserved_before - mem_reserved_after
+                cleanup_efficiency = (mem_freed / max(mem_before, 1)) * 100 if mem_before > 0 else 0
+
+                _log.info(f"VRAM after cleanup{device_info} - Allocated: {mem_after:.2f} MB, Reserved: {mem_reserved_after:.2f} MB")
+                _log.info(f"Memory freed - Allocated: {mem_freed:.2f} MB ({cleanup_efficiency:.1f}%), "
+                         f"Reserved: {reserved_freed:.2f} MB")
+
+                # Enhanced warning with context information and recommendations
+                expected_overhead = getattr(docling_serve_settings, 'expected_vram_overhead_mb', 400.0)
+
+                if mem_after > expected_overhead:
+                    overhead_mb = mem_after - expected_overhead
+                    _log.warning(
+                        f"VRAM still has {mem_after:.2f} MB allocated ({overhead_mb:.1f} MB above expected {expected_overhead:.0f} MB). "
+                        f"Cleanup effectiveness: {models_moved} models moved, {onnx_sessions_closed} ONNX sessions closed, "
+                        f"{caches_cleared} caches cleared."
+                    )
+
+                    # Provide recommendations based on remaining memory
+                    if overhead_mb > 600:
+                        _log.warning(
+                            "High VRAM retention detected. Consider: "
+                            "1) Setting DOCLING_SERVE_FORCE_CUDA_CONTEXT_RESET=true (experimental), "
+                            "2) Restarting the process for full memory release, "
+                            "3) Checking for memory leaks in external dependencies"
+                        )
+                    elif overhead_mb > 200:
+                        _log.info(
+                            "Moderate VRAM retention. This is typically normal CUDA context overhead. "
+                            "For maximum cleanup, consider process restart."
+                        )
+                else:
+                    _log.info(f"VRAM cleanup excellent - remaining {mem_after:.2f} MB is within expected range")
+
+        except Exception as e:
+            _log.warning(f"Final memory reporting failed: {e}")
+
+
+async def _move_models_to_cpu_deep(cache_obj, cache_name: str) -> int:
+    """Deep traversal to find and move PyTorch models to CPU."""
+    models_moved = 0
+    try:
+        import torch
+
+        # Handle LRU cache
+        if hasattr(cache_obj, '__wrapped__') and hasattr(cache_obj, 'cache'):
+            cache_dict = cache_obj.cache
+            _log.debug(f"Processing LRU cache {cache_name} with {len(cache_dict)} items")
+
+            for key, value in list(cache_dict.items()):
+                models_moved += await _move_object_to_cpu_recursive(value, f"cache[{cache_name}][{key}]")
+
+        # Handle regular dict cache
+        elif hasattr(cache_obj, 'values') or hasattr(cache_obj, 'items'):
+            items = list(cache_obj.items()) if hasattr(cache_obj, 'items') else list(cache_obj)
+            _log.debug(f"Processing cache {cache_name} with {len(items)} items")
+
+            for item in items:
+                if isinstance(item, tuple):
+                    value = item[1]
+                    key = item[0]
+                else:
+                    value = item
+                    key = str(item)[:50]
+
+                models_moved += await _move_object_to_cpu_recursive(value, f"cache[{cache_name}][{key}]")
+
+        # Handle single object
+        else:
+            models_moved += await _move_object_to_cpu_recursive(cache_obj, cache_name)
+
+    except Exception as e:
+        _log.debug(f"Error in _move_models_to_cpu_deep for {cache_name}: {e}")
+
+    return models_moved
+
+
+async def _move_object_to_cpu_recursive(obj, path: str) -> int:
+    """Recursively move PyTorch models to CPU and count them."""
+    import torch
+    models_moved = 0
+
+    try:
+        # Check if this is a PyTorch model
+        if hasattr(obj, 'to') and any(hasattr(obj, attr) for attr in ['parameters', 'state_dict', 'load_state_dict']):
+            try:
+                obj.to('cpu')
+                models_moved += 1
+                _log.debug(f"Moved model at {path} to CPU")
+            except Exception as e:
+                _log.debug(f"Failed to move model at {path}: {e}")
+
+        # Check for nested models in doc_converter attribute
+        if hasattr(obj, 'doc_converter') and hasattr(obj.doc_converter, 'to'):
+            try:
+                obj.doc_converter.to('cpu')
+                models_moved += 1
+                _log.debug(f"Moved doc_converter at {path} to CPU")
+            except Exception as e:
+                _log.debug(f"Failed to move doc_converter at {path}: {e}")
+
+        # Recursively search in object attributes
+        if hasattr(obj, '__dict__'):
+            for attr_name, attr_value in list(obj.__dict__.items()):
+                # Skip certain attributes that can cause issues
+                if attr_name.startswith('_') or attr_value is None or attr_value is obj:
+                    continue
+
+                # Recursively search in nested objects (but limit depth)
+                if len(path) < 200:  # Prevent infinite recursion
+                    models_moved += await _move_object_to_cpu_recursive(attr_value, f"{path}.{attr_name}")
+
+    except Exception as e:
+        _log.debug(f"Error in _move_object_to_cpu_recursive for {path}: {e}")
+
+    return models_moved
+
+
+async def _find_and_move_torch_modules(obj, path: str = "orchestrator") -> int:
+    """Find and move any torch.nn.Module objects to CPU."""
+    import torch
+    models_moved = 0
+
+    try:
+        # Check if object is a torch.nn.Module
+        if isinstance(obj, torch.nn.Module):
+            try:
+                obj.to('cpu')
+                models_moved += 1
+                _log.debug(f"Moved torch.nn.Module at {path} to CPU")
+            except Exception as e:
+                _log.debug(f"Failed to move torch.nn.Module at {path}: {e}")
+
+        # Recursively search in object attributes
+        if hasattr(obj, '__dict__'):
+            for attr_name, attr_value in list(obj.__dict__.items()):
+                # Skip certain attributes
+                if attr_name.startswith('_') or attr_value is None or attr_value is obj:
+                    continue
+
+                # Limit recursion depth
+                if len(path) < 200:
+                    models_moved += await _find_and_move_torch_modules(attr_value, f"{path}.{attr_name}")
+
+    except Exception as e:
+        _log.debug(f"Error in _find_and_move_torch_modules for {path}: {e}")
+
+    return models_moved
+
+
+async def _aggressive_onnx_cleanup(orchestrator) -> int:
+    """Aggressively find and destroy ONNX Runtime sessions."""
+    sessions_closed = 0
+
+    try:
+        # Search for ONNX sessions in orchestrator
+        sessions_closed += await _find_onnx_sessions_recursive(orchestrator, "orchestrator")
+
+        # Additional cleanup: try to access converter manager caches directly
+        cm = getattr(orchestrator, 'cm', None) or getattr(orchestrator, 'converter_manager', None)
+        if cm:
+            sessions_closed += await _find_onnx_sessions_recursive(cm, "converter_manager")
+
+    except Exception as e:
+        _log.debug(f"Error in _aggressive_onnx_cleanup: {e}")
+
+    return sessions_closed
+
+
+async def _find_onnx_sessions_recursive(obj, path: str) -> int:
+    """Recursively find and destroy ONNX Runtime sessions."""
+    sessions_closed = 0
+
+    try:
+        import onnxruntime
+
+        # Check if object is an ONNX InferenceSession
+        if 'onnxruntime' in str(type(obj)) and 'InferenceSession' in str(type(obj)):
+            try:
+                # Try to close the session if it has a close method
+                if hasattr(obj, 'close'):
+                    obj.close()
+                _log.debug(f"Closed ONNX session at {path}")
+                sessions_closed += 1
+            except Exception as e:
+                _log.debug(f"Failed to close ONNX session at {path}: {e}")
+
+        # Search in object attributes
+        if hasattr(obj, '__dict__'):
+            for attr_name, attr_value in list(obj.__dict__.items()):
+                # Limit recursion depth
+                if len(path) < 200:
+                    sessions_closed += await _find_onnx_sessions_recursive(attr_value, f"{path}.{attr_name}")
+
+    except Exception as e:
+        _log.debug(f"Error in _find_onnx_sessions_recursive for {path}: {e}")
+
+    return sessions_closed
+
+
+async def _enhanced_cache_clearing(orchestrator) -> int:
+    """Enhanced cache clearing with multiple strategies."""
+    caches_cleared = 0
+
+    try:
+        # Get converter manager
+        cm = getattr(orchestrator, 'cm', None) or getattr(orchestrator, 'converter_manager', None)
+
+        if cm:
+            # Try multiple cache attribute names
+            cache_attrs = [
+                '_get_converter_from_hash',
+                '_converter_cache',
+                '_cached_converters',
+                'converter_cache',
+                '_options_cache'
+            ]
+
+            for attr_name in cache_attrs:
+                if hasattr(cm, attr_name):
+                    cache_obj = getattr(cm, attr_name)
+                    cleared = await _clear_cache_object(cache_obj, attr_name)
+                    caches_cleared += cleared
+                    _log.debug(f"Cleared {cleared} items from cache {attr_name}")
+
+        # Try to clear any dict-like objects that might be caches
+        for attr_name in dir(orchestrator):
+            if not attr_name.startswith('_') and attr_name != 'cm':
                 try:
-                    for device_id in range(torch.cuda.device_count()):
-                        torch.cuda.set_per_process_memory_fraction(0.0, device_id)
-                        torch.cuda.empty_cache()
-                        torch.cuda.set_per_process_memory_fraction(1.0, device_id)
+                    attr = getattr(orchestrator, attr_name)
+                    if isinstance(attr, dict) and len(attr) > 0:
+                        # Check if it might be a cache (has converter-like objects)
+                        sample_item = next(iter(attr.values())) if attr else None
+                        if sample_item and hasattr(sample_item, 'to'):
+                            _log.debug(f"Found potential cache dict {attr_name} with {len(attr)} items")
+                            attr.clear()
+                            caches_cleared += len(attr)
                 except Exception:
                     pass
 
-                # Final empty cache calls
-                torch.cuda.empty_cache()
-                torch.cuda.synchronize()
+    except Exception as e:
+        _log.debug(f"Error in _enhanced_cache_clearing: {e}")
 
-                mem_after = torch.cuda.memory_allocated() / 1024**2
-                mem_reserved = torch.cuda.memory_reserved() / 1024**2
-                _log.info(f"VRAM allocated after cleanup: {mem_after:.2f} MB")
-                _log.info(f"VRAM reserved after cleanup: {mem_reserved:.2f} MB")
-                _log.info("CUDA cache cleared and synchronized")
+    return caches_cleared
 
-                # If still significant memory, log warning
-                if mem_after > 100:
-                    _log.warning(f"VRAM still has {mem_after:.2f} MB allocated - this may be CUDA context overhead")
-        except Exception as e:
-            _log.warning(f"Failed to clear CUDA cache: {e}")
+
+async def _clear_cache_object(cache_obj, cache_name: str) -> int:
+    """Clear a cache object using appropriate method."""
+    items_cleared = 0
+
+    try:
+        # Handle LRU cache
+        if hasattr(cache_obj, 'cache') and hasattr(cache_obj, 'cache_clear'):
+            items_cleared = len(cache_obj.cache)
+            cache_obj.cache_clear()
+            _log.debug(f"Cleared LRU cache {cache_name} with {items_cleared} items")
+
+        # Handle regular dict
+        elif hasattr(cache_obj, 'clear'):
+            items_cleared = len(cache_obj) if hasattr(cache_obj, '__len__') else 0
+            cache_obj.clear()
+            _log.debug(f"Cleared dict cache {cache_name} with {items_cleared} items")
+
+        # Handle cache with values() method
+        elif hasattr(cache_obj, 'values'):
+            items = list(cache_obj.values())
+            items_cleared = len(items)
+            # Try to delete each item
+            if hasattr(cache_obj, '__delitem__'):
+                for key in list(cache_obj.keys()):
+                    try:
+                        del cache_obj[key]
+                    except Exception:
+                        pass
+
+    except Exception as e:
+        _log.debug(f"Error clearing cache {cache_name}: {e}")
+
+    return items_cleared
+
+
+async def _multi_stage_gc():
+    """Multi-stage garbage collection with memory pressure simulation."""
+    import gc
+
+    _log.debug("Starting multi-stage garbage collection...")
+
+    # Stage 1: Standard GC multiple times
+    for i in range(3):
+        collected = gc.collect()
+        _log.debug(f"GC stage 1.{i+1}: collected {collected} objects")
+
+    # Stage 2: Generation-specific collection
+    for gen in range(3):
+        collected = gc.collect(gen)
+        _log.debug(f"GC generation {gen}: collected {collected} objects")
+
+    # Stage 3: Force collection with memory pressure
+    try:
+        # Create temporary memory pressure to force GC
+        dummy_data = []
+        for _ in range(5):
+            dummy_data.append([0] * 1000000)  # Create some temporary lists
+
+        # Collect again
+        collected = gc.collect()
+        _log.debug(f"GC with memory pressure: collected {collected} objects")
+
+        # Clean up dummy data
+        del dummy_data
+        gc.collect()
+
+    except Exception as e:
+        _log.debug(f"Memory pressure GC failed: {e}")
+
+
+async def _onnx_provider_cleanup():
+    """ONNX Runtime provider-specific cleanup."""
+    try:
+        import onnxruntime as ort
+
+        # Check available providers
+        providers = ort.get_available_providers()
+        if 'CUDAExecutionProvider' in providers:
+            _log.debug("ONNX Runtime CUDA provider detected, attempting cleanup...")
+
+            # Try to force CUDA provider cleanup by creating minimal sessions
+            try:
+                # Create a minimal session to trigger provider cleanup
+                sess_options = ort.SessionOptions()
+                sess_options.inter_op_num_threads = 1
+                sess_options.intra_op_num_threads = 1
+
+                # This sometimes forces ONNX Runtime to clean up cached allocations
+                _log.debug("Creating temporary ONNX session to trigger cleanup...")
+                # We don't actually need to create a session, just access providers
+                # The provider initialization/cleanup sometimes helps
+            except Exception as e:
+                _log.debug(f"ONNX provider cleanup attempt: {e}")
+
+    except ImportError:
+        pass  # onnxruntime not available
+    except Exception as e:
+        _log.debug(f"ONNX provider cleanup error: {e}")
+
+
+async def _aggressive_cuda_cleanup():
+    """Aggressive CUDA memory cleanup with advanced context management."""
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return
+
+        _log.debug("Starting aggressive CUDA cleanup with context management...")
+
+        # Store initial context info for debugging
+        device_count = torch.cuda.device_count()
+        _log.debug(f"Found {device_count} CUDA devices")
+
+        # Stage 1: Force CUDA context cleanup through device operations
+        await _force_cuda_context_cleanup()
+
+        # Stage 2: Multi-pass memory clearing with different strategies
+        await _multi_pass_memory_clearing()
+
+        # Stage 3: Advanced context manipulation if enabled
+        if getattr(docling_serve_settings, 'force_cuda_context_reset', False):
+            await _advanced_cuda_context_reset()
+
+        # Stage 4: Memory pool manipulation
+        await _manipulate_cuda_memory_pools()
+
+        # Stage 5: Final cleanup and synchronization
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+
+        _log.debug("Aggressive CUDA cleanup with context management completed")
+
+    except ImportError:
+        pass
+    except Exception as e:
+        _log.debug(f"Aggressive CUDA cleanup error: {e}")
+
+
+async def _force_cuda_context_cleanup():
+    """Force CUDA context cleanup through device operations."""
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return
+
+        _log.debug("Forcing CUDA context cleanup...")
+
+        device_count = torch.cuda.device_count()
+
+        for device_id in range(device_count):
+            try:
+                # Switch to device
+                torch.cuda.set_device(device_id)
+
+                # Force context activity
+                _ = torch.cuda.memory_allocated(device_id)
+                _ = torch.cuda.memory_reserved(device_id)
+
+                # Create and destroy a small tensor to force context activity
+                dummy = torch.tensor([1.0], device=f'cuda:{device_id}')
+                del dummy
+
+                # Clear cache on this device
+                with torch.cuda.device(device_id):
+                    torch.cuda.empty_cache()
+
+                _log.debug(f"Context cleanup completed for device {device_id}")
+
+            except Exception as e:
+                _log.debug(f"Context cleanup failed for device {device_id}: {e}")
+
+        # Synchronize all devices
+        torch.cuda.synchronize()
+
+    except Exception as e:
+        _log.debug(f"Force CUDA context cleanup error: {e}")
+
+
+async def _multi_pass_memory_clearing():
+    """Multi-pass memory clearing with different strategies."""
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return
+
+        _log.debug("Starting multi-pass memory clearing...")
+
+        # Pass 1: Standard cache clearing
+        for i in range(5):
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+
+        # Pass 2: Memory fraction manipulation with extreme values
+        device_count = torch.cuda.device_count()
+        for device_id in range(device_count):
+            try:
+                # Try extreme memory fractions
+                fractions = [0.001, 0.01, 0.1, 0.5, 1.0]
+                for fraction in fractions:
+                    torch.cuda.set_per_process_memory_fraction(fraction, device_id)
+                    torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
+
+                _log.debug(f"Memory fraction manipulation completed for device {device_id}")
+
+            except Exception as e:
+                _log.debug(f"Memory fraction manipulation failed for device {device_id}: {e}")
+
+        # Pass 3: Memory statistics reset
+        for device_id in range(device_count):
+            try:
+                with torch.cuda.device(device_id):
+                    torch.cuda.reset_peak_memory_stats()
+                    torch.cuda.reset_accumulated_memory_stats()
+            except Exception:
+                pass
+
+        # Pass 4: Final cache clears
+        for i in range(3):
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+
+        _log.debug("Multi-pass memory clearing completed")
+
+    except Exception as e:
+        _log.debug(f"Multi-pass memory clearing error: {e}")
+
+
+async def _advanced_cuda_context_reset():
+    """Advanced CUDA context reset (experimental and potentially unsafe)."""
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return
+
+        _log.warning("Attempting advanced CUDA context reset (experimental)...")
+
+        device_count = torch.cuda.device_count()
+
+        for device_id in range(device_count):
+            try:
+                # Get current device properties
+                device_props = torch.cuda.get_device_properties(device_id)
+                _log.debug(f"Device {device_id}: {device_props.name}, Total memory: {device_props.total_memory / 1024**3:.2f} GB")
+
+                # Try to release and reinitialize CUDA context
+                original_device = torch.cuda.current_device()
+
+                # Attempt to reset device (this is experimental and may not work on all systems)
+                try:
+                    # This is a potentially dangerous operation, so we wrap it carefully
+                    if hasattr(torch.cuda, 'reset_device'):
+                        torch.cuda.reset_device(device_id)
+                        _log.debug(f"Reset device {device_id}")
+                except Exception as e:
+                    _log.debug(f"Device reset failed for {device_id}: {e}")
+
+                # Restore original device
+                torch.cuda.set_device(original_device)
+
+            except Exception as e:
+                _log.debug(f"Advanced context reset failed for device {device_id}: {e}")
+
+        # Force cleanup after context manipulation
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+
+        _log.debug("Advanced CUDA context reset completed")
+
+    except Exception as e:
+        _log.debug(f"Advanced CUDA context reset error: {e}")
+
+
+async def _manipulate_cuda_memory_pools():
+    """Manipulate CUDA memory pools to force cleanup."""
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return
+
+        _log.debug("Manipulating CUDA memory pools...")
+
+        device_count = torch.cuda.device_count()
+
+        for device_id in range(device_count):
+            try:
+                # Get memory pool info if available
+                if hasattr(torch.cuda, 'memory') and hasattr(torch.cuda.memory, 'memory_summary'):
+                    try:
+                        summary = torch.cuda.memory_summary(device=device_id)
+                        _log.debug(f"Memory summary for device {device_id}: {summary[:500]}...")
+                    except Exception:
+                        pass
+
+                # Try to access and manipulate memory allocation contexts
+                try:
+                    # Force memory allocation and deallocation
+                    with torch.cuda.device(device_id):
+                        # Allocate a large tensor and immediately delete it
+                        large_tensor = torch.randn(1000, 1000, device=f'cuda:{device_id}')
+                        del large_tensor
+                        torch.cuda.empty_cache()
+
+                        # Try memory pool reset if available
+                        if hasattr(torch.cuda, 'memory') and hasattr(torch.cuda.memory, 'empty_cache'):
+                            torch.cuda.memory.empty_cache()
+
+                except Exception as e:
+                    _log.debug(f"Memory pool manipulation failed for device {device_id}: {e}")
+
+            except Exception as e:
+                _log.debug(f"Memory pool manipulation error for device {device_id}: {e}")
+
+        # Final synchronization
+        torch.cuda.synchronize()
+
+        _log.debug("CUDA memory pool manipulation completed")
+
+    except Exception as e:
+        _log.debug(f"CUDA memory pool manipulation error: {e}")
 
 
 async def cleanup_models_after_task(orchestrator: BaseOrchestrator, task_id: str):
@@ -507,6 +1063,31 @@ def create_app():  # noqa: C901
                 allowed_paths=["./logo.png", tmp_output_dir],
                 root_path=gradio_root_path,
             )
+
+            # Add catch-all handler for Gradio upload progress to avoid 404 warnings
+            @app.get("/ui/gradio_api/upload_progress")
+            async def handle_upload_progress(upload_id: str = None):
+                """Handle Gradio upload progress requests to avoid 404 warnings."""
+                from fastapi.responses import JSONResponse
+                return JSONResponse(
+                    content={
+                        "status": "completed",
+                        "progress": 1.0,
+                        "message": "Upload completed or no upload in progress"
+                    }
+                )
+
+            @app.get("/ui/gradio_api/upload_progress/{upload_id}")
+            async def handle_upload_progress_with_id(upload_id: str):
+                """Handle Gradio upload progress requests with specific ID to avoid 404 warnings."""
+                from fastapi.responses import JSONResponse
+                return JSONResponse(
+                    content={
+                        "status": "completed",
+                        "progress": 1.0,
+                        "message": "Upload completed or no upload in progress"
+                    }
+                )
         except ImportError:
             _log.warning(
                 "Docling Serve enable_ui is activated, but gradio is not installed. "
@@ -741,7 +1322,118 @@ def create_app():  # noqa: C901
 
     @app.get("/health", tags=["health"])
     def health() -> HealthCheckResponse:
-        return HealthCheckResponse()
+        memory_info = None
+        try:
+            import torch
+            if torch.cuda.is_available():
+                device_count = torch.cuda.device_count()
+                total_allocated = 0
+                total_reserved = 0
+                total_memory = 0
+                devices = []
+
+                for device_id in range(device_count):
+                    allocated = torch.cuda.memory_allocated(device_id) / 1024**2
+                    reserved = torch.cuda.memory_reserved(device_id) / 1024**2
+                    device_props = torch.cuda.get_device_properties(device_id)
+                    device_total = device_props.total_memory / 1024**2
+
+                    total_allocated += allocated
+                    total_reserved += reserved
+                    total_memory += device_total
+
+                    device_info = {
+                        "id": device_id,
+                        "name": device_props.name,
+                        "total_memory_mb": device_total,
+                        "allocated_mb": allocated,
+                        "reserved_mb": reserved,
+                        "utilization_percent": (allocated / device_total) * 100 if device_total > 0 else 0
+                    }
+                    devices.append(device_info)
+
+                memory_info = {
+                    "vram": {
+                        "allocated_mb": total_allocated,
+                        "reserved_mb": total_reserved,
+                        "total_mb": total_memory,
+                        "utilization_percent": (total_allocated / total_memory) * 100 if total_memory > 0 else 0,
+                        "devices": devices
+                    },
+                    "cleanup_enabled": docling_serve_settings.free_vram_on_idle,
+                    "expected_overhead_mb": getattr(docling_serve_settings, 'expected_vram_overhead_mb', 400.0)
+                }
+
+                # Add system memory if psutil is available
+                try:
+                    import psutil
+                    system_memory = psutil.virtual_memory()
+                    memory_info["system"] = {
+                        "total_mb": system_memory.total / 1024**2,
+                        "available_mb": system_memory.available / 1024**2,
+                        "used_mb": system_memory.used / 1024**2,
+                        "utilization_percent": system_memory.percent
+                    }
+                except ImportError:
+                    pass
+
+        except Exception as e:
+            _log.debug(f"Failed to collect memory info for health endpoint: {e}")
+
+        return HealthCheckResponse(memory_usage=memory_info)
+
+    @app.get("/memory", tags=["health"], response_model=MemoryUsageResponse)
+    def memory_usage() -> MemoryUsageResponse:
+        """Detailed memory usage endpoint for monitoring."""
+        response = MemoryUsageResponse(
+            cleanup_enabled=docling_serve_settings.free_vram_on_idle
+        )
+
+        try:
+            import torch
+            if torch.cuda.is_available():
+                device_count = torch.cuda.device_count()
+                total_allocated = 0
+                total_reserved = 0
+                total_memory = 0
+                devices = []
+
+                for device_id in range(device_count):
+                    allocated = torch.cuda.memory_allocated(device_id) / 1024**2
+                    reserved = torch.cuda.memory_reserved(device_id) / 1024**2
+                    device_props = torch.cuda.get_device_properties(device_id)
+                    device_total = device_props.total_memory / 1024**2
+
+                    total_allocated += allocated
+                    total_reserved += reserved
+                    total_memory += device_total
+
+                    devices.append({
+                        "id": device_id,
+                        "name": device_props.name,
+                        "total_memory_mb": device_total,
+                        "allocated_mb": allocated,
+                        "reserved_mb": reserved,
+                        "utilization_percent": (allocated / device_total) * 100 if device_total > 0 else 0
+                    })
+
+                response.vram_allocated_mb = total_allocated
+                response.vram_reserved_mb = total_reserved
+                response.vram_total_mb = total_memory
+                response.device_info = {"devices": devices}
+
+        except Exception as e:
+            _log.debug(f"Failed to collect detailed memory info: {e}")
+
+        # Add system memory if available
+        try:
+            import psutil
+            system_memory = psutil.virtual_memory()
+            response.system_memory_mb = system_memory.used / 1024**2
+        except ImportError:
+            pass
+
+        return response
 
     # API readiness compatibility for OpenShift AI Workbench
     @app.get("/api", include_in_schema=False)

@@ -51,6 +51,11 @@ class DoclingServeSettings(BaseSettings):
     cleanup_poll_interval: float = 5.0  # seconds
     options_cache_size: int = 2
 
+    # Enhanced VRAM management settings
+    expected_vram_overhead_mb: float = 400.0  # Expected VRAM overhead in MB after cleanup
+    force_cuda_context_reset: bool = False  # Experimental: Force CUDA context reset (may be unstable)
+    enable_detailed_memory_logging: bool = False  # Enable detailed memory usage logging
+
     # External model unloading (for low VRAM systems)
     unload_ollama_base_url: Optional[str] = None
     unload_ollama_model: Optional[str] = None
