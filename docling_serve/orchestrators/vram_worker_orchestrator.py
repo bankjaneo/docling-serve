@@ -88,8 +88,13 @@ def _worker_process_entry(
     After completion (success or failure), the process terminates, releasing all VRAM.
     """
     try:
-        # Import heavy dependencies inside worker process
+        # Import all dependencies inside worker process
         # This ensures main process doesn't load CUDA
+        import os
+        import base64
+        import tempfile
+        from pathlib import Path
+
         from docling.datamodel.pipeline_options import PdfBackend
         from docling_jobkit.convert.manager import (
             DoclingConverterManager,
@@ -145,11 +150,6 @@ def _worker_process_entry(
                     # This is a FileSourceRequest object, extract the path
                     if hasattr(source, 'base64_data') and source.base64_data:
                         # For base64 data, we need to decode and write to temp file
-                        import base64
-                        import tempfile
-                        import os
-                        from pathlib import Path
-
                         # Decode base64 and write to temporary file
                         file_data = base64.b64decode(source.base64_data)
                         with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as temp_file:
@@ -179,11 +179,6 @@ def _worker_process_entry(
                     # This is a FileSourceRequest object, extract the path
                     if hasattr(source, 'base64_data') and source.base64_data:
                         # For base64 data, we need to decode and write to temp file
-                        import base64
-                        import tempfile
-                        import os
-                        from pathlib import Path
-
                         # Decode base64 and write to temporary file
                         file_data = base64.b64decode(source.base64_data)
                         with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as temp_file:
