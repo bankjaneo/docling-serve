@@ -73,6 +73,7 @@ from docling_serve.datamodel.responses import (
     ClearResponse,
     ConvertDocumentResponse,
     HealthCheckResponse,
+    MemoryUsageResponse,
     MessageKind,
     PresignedUrlConvertDocumentResponse,
     TaskStatusResponse,
