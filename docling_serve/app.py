@@ -195,7 +195,12 @@ async def _unload_llama_swap(base_url: str):
     # Parse URL to extract only scheme and netloc, stripping any path components
     # This handles cases where users include /v1 or other paths in the base URL
     parsed = httpx.URL(base_url)
-    clean_base_url = f"{parsed.scheme}://{parsed.netloc}"
+
+    # Handle case where parsed components come as bytes
+    scheme = parsed.scheme.decode() if isinstance(parsed.scheme, bytes) else parsed.scheme
+    netloc = parsed.netloc.decode() if isinstance(parsed.netloc, bytes) else parsed.netloc
+
+    clean_base_url = f"{scheme}://{netloc}"
     url = f"{clean_base_url}/unload"
     _log.warning(f"DEBUG: Final URL: {url}")
 
