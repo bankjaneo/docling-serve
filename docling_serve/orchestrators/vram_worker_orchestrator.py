@@ -198,6 +198,27 @@ class VRAMWorkerOrchestrator(BaseOrchestrator):
         """Bind a notifier for task status updates."""
         self._notifier = notifier
 
+    async def _safe_notify(self, task_id: str) -> None:
+        """
+        Safely notify task subscribers, handling cases where task has no subscribers.
+
+        This avoids errors when notifying tasks that haven't been registered with
+        the websocket notifier (e.g., API calls without websocket connections).
+        """
+        if not self._notifier:
+            return
+
+        try:
+            await self._notifier.notify_task_subscribers(task_id)
+        except RuntimeError as e:
+            # Task doesn't have subscribers list - this is normal for non-websocket requests
+            if "does not have a subscribers list" in str(e):
+                _log.debug(f"Task {task_id} has no subscribers (non-websocket request)")
+            else:
+                raise
+        except Exception as e:
+            _log.warning(f"Failed to notify subscribers for task {task_id}: {e}")
+
     async def warm_up_caches(self) -> None:
         """
         Warm up caches - NO-OP for VRAM orchestrator.
@@ -323,8 +344,7 @@ class VRAMWorkerOrchestrator(BaseOrchestrator):
             # Update task status to STARTED
             self.tasks[task_id].task_status = TaskStatus.STARTED
             self.task_start_times[task_id] = time.time()  # Record start time
-            if self._notifier:
-                await self._notifier.notify_task_subscribers(task_id)
+            await self._safe_notify(task_id)
 
             # Spawn worker process
             # Use 'spawn' start method to ensure clean process (no CUDA inheritance)
@@ -346,8 +366,7 @@ class VRAMWorkerOrchestrator(BaseOrchestrator):
             _log.error(f"Failed to spawn worker for task {task_id}: {e}")
             self.tasks[task_id].task_status = TaskStatus.FAILURE
             self.task_results[task_id] = {"error": str(e)}
-            if self._notifier:
-                await self._notifier.notify_task_subscribers(task_id)
+            await self._safe_notify(task_id)
 
     async def _check_workers(self) -> None:
         """Check status of active worker processes."""
@@ -382,8 +401,7 @@ class VRAMWorkerOrchestrator(BaseOrchestrator):
                     "error": f"Task timed out after {elapsed:.1f} seconds"
                 }
 
-                if self._notifier:
-                    await self._notifier.notify_task_subscribers(task_id)
+                await self._safe_notify(task_id)
 
                 completed_tasks.append(task_id)
                 continue
@@ -430,8 +448,7 @@ class VRAMWorkerOrchestrator(BaseOrchestrator):
                     }
 
                 # Notify status change
-                if self._notifier:
-                    await self._notifier.notify_task_subscribers(task_id)
+                await self._safe_notify(task_id)
 
                 completed_tasks.append(task_id)
 
