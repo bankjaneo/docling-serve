@@ -96,6 +96,7 @@ def _worker_process_entry(
         from pathlib import Path
 
         from docling.datamodel.pipeline_options import PdfBackend
+from docling.datamodel.base_models import FormatOptions
         from docling_jobkit.convert.manager import (
             DoclingConverterManager,
             DoclingConverterManagerConfig,
@@ -108,18 +109,20 @@ def _worker_process_entry(
         cm = DoclingConverterManager(config=cm_config)
 
         # Get a converter instance from the manager
-        # Try to get converter without pdf_format_option first
-        try:
-            converter = cm.get_converter()
-        except TypeError as e:
-            _log.error(f"Failed to get converter without pdf_format_option: {e}")
+        # Create a proper PDF format option using docling's FormatOptions
+        pdf_backend = PdfBackend.DLPARSE_V4
+        if task_data.convert_options and 'pdf_backend' in task_data.convert_options:
+            pdf_backend_str = task_data.convert_options['pdf_backend']
+            # Convert string to PdfBackend enum
+            if hasattr(PdfBackend, pdf_backend_str.upper()):
+                pdf_backend = PdfBackend[pdf_backend_str.upper()]
 
-            # If that fails, try with None
-            try:
-                converter = cm.get_converter(pdf_format_option=None)
-            except TypeError as e2:
-                _log.error(f"Failed to get converter with pdf_format_option=None: {e2}")
-                raise ValueError(f"Unable to get converter: {e2}")
+        # Create FormatOptions with the backend - this should have all required attributes
+        pdf_format_option = FormatOptions(
+            pdf_backend=pdf_backend
+        )
+
+        converter = cm.get_converter(pdf_format_option=pdf_format_option)
 
         # Perform conversion
         task_type_str = task_data.task_type.upper() if isinstance(task_data.task_type, str) else task_data.task_type
