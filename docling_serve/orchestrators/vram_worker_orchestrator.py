@@ -299,38 +299,62 @@ class VRAMWorkerOrchestrator(BaseOrchestrator):
 
         # Serialize complex objects to JSON-safe formats
         # This ensures everything can be pickled for multiprocessing
-        def _serialize_to_dict(obj):
-            """Convert Pydantic models and other objects to JSON-safe dicts."""
+        import json
+
+        def _serialize_to_json_safe(obj):
+            """
+            Convert any object to JSON-safe primitives.
+            Handles Pydantic models, enums, and complex nested structures.
+            """
             if obj is None:
                 return None
+
+            # Try Pydantic model serialization first (handles enums properly)
             if hasattr(obj, 'model_dump'):
-                # Pydantic v2
                 try:
+                    # Pydantic v2 with JSON mode (converts enums to values)
                     return obj.model_dump(mode='json')
                 except Exception:
-                    return obj.model_dump()
+                    try:
+                        return obj.model_dump()
+                    except Exception:
+                        pass
             elif hasattr(obj, 'dict'):
-                # Pydantic v1
-                return obj.dict()
-            elif isinstance(obj, dict):
-                return obj
-            else:
-                # Try to convert to dict
-                import json
                 try:
-                    return json.loads(json.dumps(obj, default=str))
+                    # Pydantic v1
+                    return obj.dict()
                 except Exception:
-                    return obj
+                    pass
 
-        # Create worker task data with serialized options
+            # Handle dictionaries recursively
+            if isinstance(obj, dict):
+                return {k: _serialize_to_json_safe(v) for k, v in obj.items()}
+
+            # Handle lists recursively
+            if isinstance(obj, (list, tuple)):
+                return [_serialize_to_json_safe(item) for item in obj]
+
+            # Handle enums
+            if hasattr(obj, 'value'):
+                return obj.value
+
+            # Try JSON round-trip as fallback
+            try:
+                # This will convert most objects to JSON-safe types
+                return json.loads(json.dumps(obj, default=str))
+            except Exception:
+                # Last resort: convert to string
+                return str(obj)
+
+        # Create worker task data with fully serialized options
         worker_task = WorkerTask(
             task_id=task_id,
             task_type=task_type.value if hasattr(task_type, 'value') else str(task_type),
             sources=sources,
-            convert_options=convert_options,
-            chunking_options=_serialize_to_dict(chunking_options),
-            chunking_export_options=_serialize_to_dict(chunking_export_options),
-            target=_serialize_to_dict(target),
+            convert_options=_serialize_to_json_safe(convert_options),
+            chunking_options=_serialize_to_json_safe(chunking_options),
+            chunking_export_options=_serialize_to_json_safe(chunking_export_options),
+            target=_serialize_to_json_safe(target),
             converter_manager_config=self.converter_manager_config,
         )
 
