@@ -1173,6 +1173,10 @@ def create_app():  # noqa: C901
                     status_code=404,
                     detail="Task result not found. Please wait for a completion status.",
                 )
+
+            # Cleanup models after fetching results if no other tasks are running
+            await cleanup_models_after_task(orchestrator, task_id)
+
             response = await prepare_response(
                 task_id=task_id,
                 task_result=task_result,
