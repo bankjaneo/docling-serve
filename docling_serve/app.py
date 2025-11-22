@@ -117,6 +117,65 @@ for handler in root_logger.handlers:  # Iterate through existing handlers
 
 _log = logging.getLogger(__name__)
 
+# Global VRAM tracking for detecting accumulation trends
+_vram_usage_history = []
+_max_vram_history_entries = 10
+
+
+def track_vram_usage(context: str = "cleanup"):
+    """Track VRAM usage to detect accumulation trends over time."""
+    try:
+        import torch
+        if torch.cuda.is_available():
+            allocated = torch.cuda.memory_allocated() / 1024**2
+            reserved = torch.cuda.memory_reserved() / 1024**2
+
+            _vram_usage_history.append({
+                'allocated': allocated,
+                'reserved': reserved,
+                'context': context,
+                'timestamp': time.time()
+            })
+
+            # Keep only recent entries
+            if len(_vram_usage_history) > _max_vram_history_entries:
+                _vram_usage_history.pop(0)
+
+            # Detect accumulation trend
+            if len(_vram_usage_history) >= 3:
+                recent_cleanup = [h for h in _vram_usage_history[-3:] if h['context'] == 'cleanup']
+                if len(recent_cleanup) >= 2:
+                    # Check if allocated memory is trending upward during cleanups
+                    allocations = [h['allocated'] for h in recent_cleanup]
+                    if allocations[-1] > allocations[0] + 50:  # 50MB threshold
+                        _log.warning(f"VRAM accumulation detected: {allocations[0]:.1f}MB → {allocations[-1]:.1f}MB across recent cleanups")
+                        _log.warning("This suggests a memory leak or CUDA context accumulation")
+
+            return allocated, reserved
+    except Exception as e:
+        _log.debug(f"VRAM tracking failed: {e}")
+        return None, None
+
+
+def log_vram_trend_analysis():
+    """Log detailed VRAM trend analysis."""
+    if len(_vram_usage_history) < 2:
+        return
+
+    cleanup_entries = [h for h in _vram_usage_history if h['context'] == 'cleanup']
+    if len(cleanup_entries) < 2:
+        return
+
+    first_cleanup = cleanup_entries[0]
+    last_cleanup = cleanup_entries[-1]
+
+    alloc_change = last_cleanup['allocated'] - first_cleanup['allocated']
+    reserv_change = last_cleanup['reserved'] - first_cleanup['reserved']
+
+    if abs(alloc_change) > 10:  # Only log significant changes
+        trend = "increasing" if alloc_change > 0 else "decreasing"
+        _log.info(f"VRAM trend over {len(cleanup_entries)} cleanups: {trend} by {abs(alloc_change):.1f}MB allocated, {abs(reserv_change):.1f}MB reserved")
+
 
 # Context manager to initialize and clean up the lifespan of the FastAPI app
 @asynccontextmanager
@@ -234,11 +293,24 @@ async def _unload_ollama(base_url: str, model_name: str):
 async def ensure_models_loaded(orchestrator: BaseOrchestrator):
     """Ensure models are loaded before processing if lazy loading is enabled."""
     if docling_serve_settings.free_vram_on_idle:
+        # Track VRAM before loading models
+        mem_before, mem_reserved_before = track_vram_usage("model_load_start")
+        if mem_before is not None:
+            _log.debug(f"VRAM before model loading: {mem_before:.2f} MB allocated")
+
         # First, unload external models to free VRAM if configured
         await unload_external_models()
         # Then load Docling models
         _log.info("Loading models for processing...")
         await orchestrator.warm_up_caches()
+
+        # Track VRAM after loading models
+        mem_after, mem_reserved_after = track_vram_usage("model_load_end")
+        if mem_after is not None:
+            increase = mem_after - mem_before
+            _log.info(f"VRAM after model loading: {mem_after:.2f} MB (+{increase:.2f} MB)")
+            if increase > 1000:  # Warning for large memory increases
+                _log.warning(f"Large VRAM increase detected: {increase:.2f} MB")
 
 
 async def cleanup_models_if_needed(orchestrator: BaseOrchestrator):
@@ -246,16 +318,16 @@ async def cleanup_models_if_needed(orchestrator: BaseOrchestrator):
     if docling_serve_settings.free_vram_on_idle:
         _log.info("Clearing models to free VRAM...")
 
-        # Log VRAM usage before cleanup
-        try:
-            import torch
-            if torch.cuda.is_available():
-                mem_before = torch.cuda.memory_allocated() / 1024**2
-                _log.info(f"VRAM allocated before cleanup: {mem_before:.2f} MB")
-        except Exception:
-            pass
+        # Track VRAM usage before cleanup and detect trends
+        mem_before, mem_reserved_before = track_vram_usage("cleanup_start")
+        if mem_before is not None:
+            _log.info(f"VRAM allocated before cleanup: {mem_before:.2f} MB")
+            _log.info(f"VRAM reserved before cleanup: {mem_reserved_before:.2f} MB")
 
-        # Step 1: Move models to CPU before deletion (critical for VRAM release)
+        # Log trend analysis
+        log_vram_trend_analysis()
+
+        # Step 1: Move models to CPU and force release references
         try:
             import torch
             if torch.cuda.is_available():
@@ -279,8 +351,12 @@ async def cleanup_models_if_needed(orchestrator: BaseOrchestrator):
                                     converter = value  # In LRU cache, value might be wrapped
                                     if hasattr(converter, 'doc_converter') and hasattr(converter.doc_converter, 'to'):
                                         converter.doc_converter.to('cpu')
+                                        # Force delete reference
+                                        del converter.doc_converter
                                     elif hasattr(converter, 'to'):
                                         converter.to('cpu')
+                                        # Force delete reference
+                                        del converter
                                 except Exception:
                                     pass
                         except Exception:
@@ -288,28 +364,49 @@ async def cleanup_models_if_needed(orchestrator: BaseOrchestrator):
         except Exception as e:
             _log.warning(f"Failed to move models to CPU: {e}")
 
-        # Step 2: Try to explicitly close ONNX Runtime sessions
+        # Step 2: Force garbage collection BEFORE clearing converters
+        import gc
+        _log.info("Pre-cleanup garbage collection...")
+        for _ in range(3):
+            gc.collect()
+
+        # Step 3: Try to explicitly close ONNX Runtime sessions and delete all references
         try:
             if hasattr(orchestrator, 'cm') and hasattr(orchestrator.cm, '_get_converter_from_hash'):
                 cache = orchestrator.cm._get_converter_from_hash
                 if hasattr(cache, 'cache'):
                     _log.info("Attempting to close ONNX Runtime sessions...")
+                    converters_to_delete = []
                     for key, converter in list(cache.cache.items()):
                         try:
+                            # Store converter reference for deletion
+                            converters_to_delete.append((key, converter))
+
                             # Try to access and delete ONNX sessions within converters
                             if hasattr(converter, '__dict__'):
                                 for attr_name in list(converter.__dict__.keys()):
                                     attr = getattr(converter, attr_name, None)
                                     # Look for ONNX InferenceSession objects
                                     if attr is not None and 'onnxruntime' in str(type(attr)):
-                                        _log.info(f"Found ONNX session in {attr_name}, deleting...")
+                                        _log.debug(f"Found ONNX session in {attr_name}, deleting...")
+                                        # Force close session if possible
+                                        if hasattr(attr, 'close'):
+                                            attr.close()
                                         delattr(converter, attr_name)
                         except Exception as e:
                             _log.debug(f"Error closing ONNX session: {e}")
+
+                    # Force delete all converter references
+                    for key, converter in converters_to_delete:
+                        try:
+                            del converter
+                        except:
+                            pass
+                    converters_to_delete.clear()
         except Exception as e:
             _log.warning(f"Failed to close ONNX sessions: {e}")
 
-        # Step 3: Clear converters and explicitly delete cache entries
+        # Step 4: Clear converters and explicitly delete cache entries
         await orchestrator.clear_converters()
 
         # Also try to manually clear the cache dictionary
@@ -328,63 +425,133 @@ async def cleanup_models_if_needed(orchestrator: BaseOrchestrator):
         except Exception as e:
             _log.debug(f"Manual cache clear: {e}")
 
-        # Step 4: Force aggressive garbage collection
-        import gc
+        # Step 5: Force aggressive garbage collection
         _log.info("Running aggressive garbage collection...")
         for _ in range(5):
             gc.collect()
         gc.collect(2)  # Full collection including generation 2
 
-        # Step 5: Try to force ONNX Runtime CUDA cleanup
+        # Step 6: Try to force ONNX Runtime CUDA cleanup with additional techniques
         try:
             import onnxruntime as ort
             providers = ort.get_available_providers()
             if 'CUDAExecutionProvider' in providers:
                 _log.info("ONNX Runtime CUDA provider detected, forcing cleanup...")
-                # Trick: Creating and immediately destroying a session sometimes triggers
-                # ONNX Runtime to release cached CUDA allocations
-                # This is a workaround since ONNX Runtime has no official cleanup API
-                import gc
-                gc.collect()
-                gc.collect()
+                # Multiple cleanup attempts for ONNX Runtime
+                for attempt in range(3):
+                    gc.collect()
+                    # Force CUDA context reset if possible
+                    try:
+                        torch.cuda.empty_cache()
+                        torch.cuda.synchronize()
+                    except:
+                        pass
         except Exception as e:
             _log.debug(f"ONNX Runtime cleanup attempt: {e}")
 
-        # Step 6: Explicitly free CUDA memory
+        # Step 7: Enhanced CUDA memory cleanup with multiple techniques
         try:
             import torch
             if torch.cuda.is_available():
-                _log.info("Clearing CUDA cache...")
-                # Clear CUDA cache multiple times
-                torch.cuda.empty_cache()
-                torch.cuda.synchronize()
+                _log.info("Starting enhanced CUDA memory cleanup...")
 
-                # Reset peak memory stats
+                # Track devices
+                device_count = torch.cuda.device_count()
+                _log.info(f"Found {device_count} CUDA device(s)")
+
+                # Step 7a: Force empty cache and synchronize multiple times
+                for i in range(3):
+                    torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
+                    _log.debug(f"CUDA cleanup iteration {i+1} completed")
+
+                # Step 7b: Reset memory stats
                 torch.cuda.reset_peak_memory_stats()
                 torch.cuda.reset_accumulated_memory_stats()
 
-                # Try to set memory fraction to minimal (releases reserved memory)
-                try:
-                    for device_id in range(torch.cuda.device_count()):
+                # Step 7c: Try aggressive memory fraction reset for each device
+                for device_id in range(device_count):
+                    try:
+                        current_device = torch.cuda.current_device()
+                        torch.cuda.set_device(device_id)
+
+                        # Get current memory state
+                        mem_alloc = torch.cuda.memory_allocated(device_id)
+                        mem_reserv = torch.cuda.memory_reserved(device_id)
+                        _log.debug(f"Device {device_id} - Allocated: {mem_alloc/1024**2:.2f}MB, Reserved: {mem_reserv/1024**2:.2f}MB")
+
+                        # Aggressive memory fraction manipulation
+                        torch.cuda.set_per_process_memory_fraction(0.1, device_id)
+                        torch.cuda.empty_cache()
+                        torch.cuda.synchronize()
+
                         torch.cuda.set_per_process_memory_fraction(0.0, device_id)
                         torch.cuda.empty_cache()
+                        torch.cuda.synchronize()
+
                         torch.cuda.set_per_process_memory_fraction(1.0, device_id)
-                except Exception:
-                    pass
+                        torch.cuda.empty_cache()
+                        torch.cuda.synchronize()
 
-                # Final empty cache calls
-                torch.cuda.empty_cache()
-                torch.cuda.synchronize()
+                        # Restore original device
+                        torch.cuda.set_device(current_device)
 
+                    except Exception as e:
+                        _log.debug(f"Device {device_id} cleanup failed: {e}")
+                        continue
+
+                # Step 7d: Final cleanup pass with extra garbage collection
+                gc.collect()
+                for _ in range(2):
+                    torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
+
+                # Step 7e: Force context release attempts (experimental)
+                try:
+                    # This is a more aggressive technique to force CUDA context cleanup
+                    _log.debug("Attempting CUDA context cleanup...")
+
+                    # Try to force context release by creating dummy tensors and deleting them
+                    for device_id in range(device_count):
+                        try:
+                            with torch.cuda.device(device_id):
+                                # Create and immediately delete dummy tensor to force context cleanup
+                                dummy = torch.tensor([1.0], device=f'cuda:{device_id}')
+                                del dummy
+                                torch.cuda.empty_cache()
+                        except Exception as e:
+                            _log.debug(f"Context cleanup failed for device {device_id}: {e}")
+                except Exception as e:
+                    _log.debug(f"CUDA context cleanup failed: {e}")
+
+                # Step 7f: Final memory report
                 mem_after = torch.cuda.memory_allocated() / 1024**2
                 mem_reserved = torch.cuda.memory_reserved() / 1024**2
                 _log.info(f"VRAM allocated after cleanup: {mem_after:.2f} MB")
                 _log.info(f"VRAM reserved after cleanup: {mem_reserved:.2f} MB")
-                _log.info("CUDA cache cleared and synchronized")
+                _log.info("Enhanced CUDA cleanup completed")
 
-                # If still significant memory, log warning
+                # Track final VRAM usage
+                track_vram_usage("cleanup_end")
+
+                # Calculate and log cleanup effectiveness
+                if mem_before is not None:
+                    freed = mem_before - mem_after
+                    if freed > 0:
+                        _log.info(f"VRAM cleanup freed {freed:.2f} MB ({(freed/mem_before*100):.1f}% of allocated memory)")
+                    else:
+                        _log.warning(f"VRAM cleanup did not free allocated memory (change: {freed:.2f} MB)")
+
+                # If still significant memory, log detailed warning with troubleshooting tips
                 if mem_after > 100:
-                    _log.warning(f"VRAM still has {mem_after:.2f} MB allocated - this may be CUDA context overhead")
+                    _log.warning(f"VRAM still has {mem_after:.2f} MB allocated - this may be persistent CUDA context overhead")
+                    _log.info("Tip: This residual memory is often CUDA context overhead and cannot be fully cleared without process restart")
+                    _log.info("Tip: Consider reducing model size or batch size if this becomes problematic")
+
+                # Additional cleanup - one more pass for good measure
+                torch.cuda.empty_cache()
+                gc.collect()
+
         except Exception as e:
             _log.warning(f"Failed to clear CUDA cache: {e}")
 
