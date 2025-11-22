@@ -279,10 +279,27 @@ async def cleanup_models_if_needed(orchestrator: BaseOrchestrator):
         except Exception as e:
             _log.warning(f"Failed to move models to CPU: {e}")
 
-        # Step 2: Clear converters through orchestrator API
+        # Step 2: Explicitly close ONNX Runtime sessions before clearing converters
+        onnx_sessions_found = 0
+        try:
+            if hasattr(orchestrator, 'cm') and hasattr(orchestrator.cm, '_get_converter_from_hash'):
+                cache = orchestrator.cm._get_converter_from_hash
+                if hasattr(cache, 'cache'):
+                    _log.info("Explicitly closing ONNX Runtime sessions...")
+
+                    # Deep search for ONNX sessions in converter objects
+                    for key, converter in list(cache.cache.items()):
+                        try:
+                            _close_onnx_sessions_recursive(converter)
+                        except Exception as e:
+                            _log.debug(f"Error closing ONNX sessions in converter: {e}")
+        except Exception as e:
+            _log.debug(f"ONNX session search: {e}")
+
+        # Step 3: Clear converters through orchestrator API
         await orchestrator.clear_converters()
 
-        # Step 3: Manually clear cache entries and delete converter objects
+        # Step 4: Manually clear cache entries and delete converter objects
         try:
             if hasattr(orchestrator, 'cm') and hasattr(orchestrator.cm, '_get_converter_from_hash'):
                 cache = orchestrator.cm._get_converter_from_hash
@@ -293,13 +310,13 @@ async def cleanup_models_if_needed(orchestrator: BaseOrchestrator):
                     for key in list(cache.cache.keys()):
                         try:
                             converter = cache.cache[key]
-                            # Delete all ONNX sessions
+                            # Delete all remaining attributes
                             if hasattr(converter, '__dict__'):
                                 for attr_name in list(converter.__dict__.keys()):
-                                    attr = getattr(converter, attr_name, None)
-                                    if attr is not None and 'onnxruntime' in str(type(attr)):
-                                        _log.debug(f"Deleting ONNX session: {attr_name}")
+                                    try:
                                         delattr(converter, attr_name)
+                                    except:
+                                        pass
 
                             # Delete the converter reference
                             del cache.cache[key]
@@ -310,7 +327,7 @@ async def cleanup_models_if_needed(orchestrator: BaseOrchestrator):
         except Exception as e:
             _log.debug(f"Manual cache clear: {e}")
 
-        # Step 4: Force aggressive garbage collection (multiple passes)
+        # Step 5: Force aggressive garbage collection (multiple passes)
         import gc
         _log.info("Running aggressive garbage collection...")
         for i in range(3):
@@ -321,7 +338,7 @@ async def cleanup_models_if_needed(orchestrator: BaseOrchestrator):
         for _ in range(2):
             gc.collect()
 
-        # Step 5: Advanced PyTorch CUDA memory cleanup
+        # Step 6: Advanced PyTorch CUDA memory cleanup
         try:
             import torch
             if torch.cuda.is_available():
@@ -364,25 +381,37 @@ async def cleanup_models_if_needed(orchestrator: BaseOrchestrator):
         except Exception as e:
             _log.warning(f"Advanced CUDA cleanup failed: {e}")
 
-        # Step 6: ONNX Runtime specific cleanup
+        # Step 7: ONNX Runtime specific cleanup
         try:
             import onnxruntime as ort
             providers = ort.get_available_providers()
             if 'CUDAExecutionProvider' in providers:
                 _log.info("Performing ONNX Runtime CUDA cleanup...")
 
-                # Force garbage collection again to clean ONNX sessions
+                # ONNX Runtime maintains internal CUDA memory allocator
+                # We need to force it to release memory through aggressive GC
                 import gc
-                gc.collect()
-                gc.collect(2)
 
-                # ONNX Runtime doesn't have official cleanup API
-                # But releasing all sessions and GC should help
+                # Multiple GC passes specifically for ONNX cleanup
+                for i in range(5):
+                    gc.collect(2)
+
+                # Try to force ONNX to release its CUDA allocator cache
+                # by importing and immediately destroying a minimal session
+                try:
+                    import torch
+                    if torch.cuda.is_available():
+                        # Empty cache between GC passes
+                        torch.cuda.empty_cache()
+                        torch.cuda.synchronize()
+                except Exception:
+                    pass
+
                 _log.debug("ONNX Runtime cleanup complete")
         except Exception as e:
             _log.debug(f"ONNX Runtime cleanup: {e}")
 
-        # Step 7: Final verification and logging
+        # Step 8: Final verification and logging
         try:
             import torch
             if torch.cuda.is_available():
@@ -412,6 +441,60 @@ async def cleanup_models_if_needed(orchestrator: BaseOrchestrator):
                     _log.info(f"Remaining {mem_after:.2f} MB is likely CUDA context overhead")
         except Exception as e:
             _log.warning(f"Failed to verify VRAM cleanup: {e}")
+
+
+def _close_onnx_sessions_recursive(obj, visited=None):
+    """Recursively find and close all ONNX Runtime InferenceSession objects."""
+    if visited is None:
+        visited = set()
+
+    # Avoid infinite recursion
+    obj_id = id(obj)
+    if obj_id in visited:
+        return
+    visited.add(obj_id)
+
+    try:
+        # Check if this is an ONNX InferenceSession
+        obj_type = str(type(obj))
+        if 'onnxruntime' in obj_type and 'InferenceSession' in obj_type:
+            # Try to explicitly end the session if method exists
+            if hasattr(obj, '__del__'):
+                try:
+                    obj.__del__()
+                except Exception:
+                    pass
+            _log.debug(f"Found and closed ONNX session: {obj_type}")
+            return
+
+        # Recursively process object attributes
+        if hasattr(obj, '__dict__'):
+            for attr_name in list(obj.__dict__.keys()):
+                try:
+                    attr = getattr(obj, attr_name, None)
+                    if attr is not None:
+                        _close_onnx_sessions_recursive(attr, visited)
+                except Exception:
+                    pass
+
+        # Process list/tuple elements
+        elif isinstance(obj, (list, tuple)):
+            for item in obj:
+                try:
+                    _close_onnx_sessions_recursive(item, visited)
+                except Exception:
+                    pass
+
+        # Process dict values
+        elif isinstance(obj, dict):
+            for value in obj.values():
+                try:
+                    _close_onnx_sessions_recursive(value, visited)
+                except Exception:
+                    pass
+
+    except Exception:
+        pass
 
 
 def _move_to_cpu_recursive(obj, visited=None):
