@@ -102,7 +102,12 @@ def _worker_process_entry(
         cm = DoclingConverterManager(config=cm_config)
 
         # Get a converter instance from the manager
-        converter = cm.get_converter()
+        # Extract pdf_format_option from convert_options if available, otherwise None
+        pdf_format_option = None
+        if task_data.convert_options and 'pdf_format' in task_data.convert_options:
+            pdf_format_option = task_data.convert_options['pdf_format']
+
+        converter = cm.get_converter(pdf_format_option=pdf_format_option)
 
         # Perform conversion
         task_type_str = task_data.task_type.upper() if isinstance(task_data.task_type, str) else task_data.task_type
