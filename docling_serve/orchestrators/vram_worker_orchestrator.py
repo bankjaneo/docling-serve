@@ -487,3 +487,48 @@ class VRAMWorkerOrchestrator(BaseOrchestrator):
         if task_id not in self.tasks:
             raise TaskNotFoundError(f"Task {task_id} not found")
         return self.tasks[task_id]
+
+    async def check_connection(self) -> bool:
+        """
+        Check if orchestrator is ready to accept tasks.
+
+        For VRAM orchestrator, always returns True as it's local and always ready.
+        """
+        return True
+
+    async def queue_size(self) -> int:
+        """
+        Get the current queue size.
+
+        Returns the number of pending tasks waiting to be processed.
+        """
+        if not hasattr(self, "_pending_tasks"):
+            return 0
+        return len(self._pending_tasks)
+
+    async def get_queue_position(self, task_id: str) -> int:
+        """
+        Get the position of a task in the queue.
+
+        Returns:
+            0 if task is being processed or completed
+            N if task is at position N in the queue
+            -1 if task not found
+        """
+        # Task is being processed or completed
+        if task_id in self.active_workers:
+            return 0
+
+        if task_id in self.tasks and self.tasks[task_id].task_status in [
+            TaskStatus.SUCCESS,
+            TaskStatus.FAILED,
+        ]:
+            return 0
+
+        # Check if in pending queue
+        if hasattr(self, "_pending_tasks"):
+            for i, worker_task in enumerate(self._pending_tasks):
+                if worker_task.task_id == task_id:
+                    return i + 1
+
+        return -1
