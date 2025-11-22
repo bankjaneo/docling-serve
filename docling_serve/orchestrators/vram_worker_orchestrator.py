@@ -102,11 +102,7 @@ def _worker_process_entry(
         cm = DoclingConverterManager(config=cm_config)
 
         # Get a converter instance from the manager
-        converter = cm.get_converter(
-            options=task_data.convert_options,
-            chunking_options=task_data.chunking_options,
-            chunking_export_options=task_data.chunking_export_options,
-        )
+        converter = cm.get_converter()
 
         # Perform conversion
         task_type_str = task_data.task_type.upper() if isinstance(task_data.task_type, str) else task_data.task_type
@@ -115,7 +111,7 @@ def _worker_process_entry(
             # Convert documents using the converter
             results = []
             for source in task_data.sources:
-                conv_result = converter.convert(source)
+                conv_result = converter.convert(source, options=task_data.convert_options)
                 results.append(conv_result)
             result = results
 
@@ -124,8 +120,12 @@ def _worker_process_entry(
             results = []
             for source in task_data.sources:
                 # Convert and chunk
-                conv_result = converter.convert(source)
-                # Chunking is handled by the converter based on chunking_options
+                conv_result = converter.convert(
+                    source,
+                    options=task_data.convert_options,
+                    chunking_options=task_data.chunking_options,
+                    chunking_export_options=task_data.chunking_export_options
+                )
                 results.append(conv_result)
             result = results
         else:
