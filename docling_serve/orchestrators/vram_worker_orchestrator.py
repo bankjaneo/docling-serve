@@ -324,7 +324,7 @@ class VRAMWorkerOrchestrator(BaseOrchestrator):
             self.tasks[task_id].task_status = TaskStatus.STARTED
             self.task_start_times[task_id] = time.time()  # Record start time
             if self._notifier:
-                await self._notifier.notify(self.tasks[task_id])
+                await self._notifier.notify_task_subscribers(task_id)
 
             # Spawn worker process
             # Use 'spawn' start method to ensure clean process (no CUDA inheritance)
@@ -344,10 +344,10 @@ class VRAMWorkerOrchestrator(BaseOrchestrator):
 
         except Exception as e:
             _log.error(f"Failed to spawn worker for task {task_id}: {e}")
-            self.tasks[task_id].task_status = TaskStatus.FAILED
+            self.tasks[task_id].task_status = TaskStatus.FAILURE
             self.task_results[task_id] = {"error": str(e)}
             if self._notifier:
-                await self._notifier.notify(self.tasks[task_id])
+                await self._notifier.notify_task_subscribers(task_id)
 
     async def _check_workers(self) -> None:
         """Check status of active worker processes."""
@@ -377,13 +377,13 @@ class VRAMWorkerOrchestrator(BaseOrchestrator):
                     _log.error(f"Error terminating timed-out worker {process.pid}: {e}")
 
                 # Mark as failed
-                self.tasks[task_id].task_status = TaskStatus.FAILED
+                self.tasks[task_id].task_status = TaskStatus.FAILURE
                 self.task_results[task_id] = {
                     "error": f"Task timed out after {elapsed:.1f} seconds"
                 }
 
                 if self._notifier:
-                    await self._notifier.notify(self.tasks[task_id])
+                    await self._notifier.notify_task_subscribers(task_id)
 
                 completed_tasks.append(task_id)
                 continue
@@ -406,7 +406,7 @@ class VRAMWorkerOrchestrator(BaseOrchestrator):
                             self.task_results[task_id] = worker_result.result
                             _log.info(f"Task {task_id} completed successfully")
                         else:
-                            self.tasks[task_id].task_status = TaskStatus.FAILED
+                            self.tasks[task_id].task_status = TaskStatus.FAILURE
                             self.task_results[task_id] = {
                                 "error": worker_result.error,
                                 "traceback": worker_result.traceback_str,
@@ -415,7 +415,7 @@ class VRAMWorkerOrchestrator(BaseOrchestrator):
 
                     except Exception as e:
                         _log.error(f"Error retrieving result for task {task_id}: {e}")
-                        self.tasks[task_id].task_status = TaskStatus.FAILED
+                        self.tasks[task_id].task_status = TaskStatus.FAILURE
                         self.task_results[task_id] = {
                             "error": "Failed to retrieve worker result"
                         }
@@ -424,14 +424,14 @@ class VRAMWorkerOrchestrator(BaseOrchestrator):
                     _log.error(
                         f"Worker process {process.pid} died without result (exit code: {exit_code})"
                     )
-                    self.tasks[task_id].task_status = TaskStatus.FAILED
+                    self.tasks[task_id].task_status = TaskStatus.FAILURE
                     self.task_results[task_id] = {
                         "error": f"Worker process died (exit code: {exit_code})"
                     }
 
                 # Notify status change
                 if self._notifier:
-                    await self._notifier.notify(self.tasks[task_id])
+                    await self._notifier.notify_task_subscribers(task_id)
 
                 completed_tasks.append(task_id)
 
@@ -521,7 +521,7 @@ class VRAMWorkerOrchestrator(BaseOrchestrator):
 
         if task_id in self.tasks and self.tasks[task_id].task_status in [
             TaskStatus.SUCCESS,
-            TaskStatus.FAILED,
+            TaskStatus.FAILURE,
         ]:
             return 0
 
