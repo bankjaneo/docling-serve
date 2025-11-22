@@ -419,6 +419,20 @@ if __name__ == "__main__":
         """Async context manager entry."""
         return self
 
+    def bind_notifier(self, notifier):
+        """Bind a notifier for compatibility with existing system."""
+        _log.info("VRAMWorkerOrchestrator: notifier binding not required (uses file-based status)")
+        pass
+
+    def get_queue_position(self, task_id: str) -> int:
+        """Get queue position (not applicable for worker orchestrator)."""
+        return 0
+
+    async def process_queue(self):
+        """Process queue (not applicable for worker orchestrator)."""
+        _log.debug("VRAMWorkerOrchestrator: queue processing not required")
+        pass
+
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         """Async context manager exit - cleanup any running workers."""
 
