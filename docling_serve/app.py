@@ -943,6 +943,7 @@ def create_app():  # noqa: C901
                     include_converted_doc=include_converted_doc
                 ),
                 target=target,
+                background_tasks=background_tasks,
             )
             completed = await _wait_task_complete(
                 orchestrator=orchestrator, task_id=task.task_id
