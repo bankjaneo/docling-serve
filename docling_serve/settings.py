@@ -60,9 +60,7 @@ class DoclingServeSettings(BaseSettings):
     @classmethod
     def decode_url_if_bytes(cls, v):
         """Decode URL if it comes in as bytes from environment variable."""
-        print(f"DEBUG: Received URL value: {v}, type: {type(v)}")
         if isinstance(v, bytes):
-            print(f"DEBUG: Decoding bytes to string")
             return v.decode("utf-8")
         return v
     unload_external_model_timeout: float = 10.0  # seconds
