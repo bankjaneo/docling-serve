@@ -2,7 +2,9 @@ import asyncio
 import copy
 import importlib.metadata
 import logging
+import os
 import shutil
+import signal
 import time
 from contextlib import asynccontextmanager
 from io import BytesIO
@@ -116,6 +118,13 @@ for handler in root_logger.handlers:  # Iterate through existing handlers
         handler.setFormatter(ColoredLogFormatter(handler.formatter._fmt))
 
 _log = logging.getLogger(__name__)
+
+
+# Task counter for auto-restart functionality
+# When DOCLING_SERVE_MAX_TASKS_BEFORE_RESTART is set and free_vram_on_idle is enabled,
+# the server will automatically restart after processing N tasks to ensure complete VRAM cleanup
+_task_counter = 0
+_max_tasks_before_restart = int(os.getenv("DOCLING_SERVE_MAX_TASKS_BEFORE_RESTART", "0"))
 
 
 # Context manager to initialize and clean up the lifespan of the FastAPI app
@@ -549,9 +558,41 @@ async def cleanup_models_after_task(orchestrator: BaseOrchestrator, task_id: str
     """
     Cleanup models after a task completes (for synchronous endpoints).
     Only clears models if there are no other active tasks running.
+
+    If DOCLING_SERVE_MAX_TASKS_BEFORE_RESTART is set, will automatically
+    trigger a graceful server restart after N tasks to ensure complete VRAM cleanup.
     """
+    global _task_counter
+
     if not docling_serve_settings.free_vram_on_idle:
         return
+
+    # Increment task counter
+    _task_counter += 1
+
+    # Log task counter status
+    if _max_tasks_before_restart > 0:
+        _log.info(f"Task completed: {_task_counter}/{_max_tasks_before_restart} tasks before auto-restart")
+
+        # Check if we should restart
+        if _task_counter >= _max_tasks_before_restart:
+            _log.warning(
+                f"Reached maximum tasks ({_max_tasks_before_restart}). "
+                f"Initiating graceful shutdown for VRAM cleanup..."
+            )
+            _log.warning(
+                "Container will restart automatically if restart policy is configured. "
+                "This ensures complete VRAM release due to ONNX Runtime CUDA allocator limitations."
+            )
+
+            # Give time for current response to be sent and any pending operations
+            await asyncio.sleep(2.0)
+
+            # Trigger graceful shutdown
+            # The container restart policy will restart the server
+            _log.info("Sending SIGTERM for graceful shutdown...")
+            os.kill(os.getpid(), signal.SIGTERM)
+            return
 
     # Check if there are other active tasks before cleaning up
     has_active_tasks = False
