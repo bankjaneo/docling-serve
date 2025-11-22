@@ -107,12 +107,14 @@ def _worker_process_entry(
         class MinimalPdfFormatOption:
             def __init__(self, backend=PdfBackend.DLPARSE_V4):
                 self.backend = backend
-                self.pipeline_options = None  # Initialize as None since it's checked in the hash function
+                self.pipeline_options = None
+                self.pipeline_cls = None  # Required by the hash function
 
             def model_dump(self, serialize_as_any=True):
                 return {
                     "backend": self.backend.value,
-                    "pipeline_options": self.pipeline_options
+                    "pipeline_options": self.pipeline_options,
+                    "pipeline_cls": self.pipeline_cls
                 }
 
         # Extract pdf_backend from convert_options if available, otherwise default to DLPARSE_V4
