@@ -298,11 +298,31 @@ async def ensure_models_loaded(orchestrator: BaseOrchestrator):
         if mem_before is not None:
             _log.debug(f"VRAM before model loading: {mem_before:.2f} MB allocated")
 
+        # Check if models are already loaded to avoid double loading
+        already_loaded = False
+        try:
+            if hasattr(orchestrator, 'cm') and hasattr(orchestrator.cm, '_get_converter_from_hash'):
+                cache = orchestrator.cm._get_converter_from_hash
+                if hasattr(cache, 'cache_info'):
+                    cache_info = cache.cache_info()
+                    if cache_info.currsize > 0:
+                        _log.info(f"Models already loaded (cache size: {cache_info.currsize}), skipping warm_up_caches")
+                        already_loaded = True
+                elif hasattr(cache, 'cache') and len(cache.cache) > 0:
+                    _log.info(f"Models already loaded (cached converters: {len(cache.cache)}), skipping warm_up_caches")
+                    already_loaded = True
+        except Exception as e:
+            _log.debug(f"Failed to check if models already loaded: {e}")
+
         # First, unload external models to free VRAM if configured
         await unload_external_models()
-        # Then load Docling models
-        _log.info("Loading models for processing...")
-        await orchestrator.warm_up_caches()
+
+        if not already_loaded:
+            # Then load Docling models
+            _log.info("Loading models for processing...")
+            await orchestrator.warm_up_caches()
+        else:
+            _log.info("Using already loaded models")
 
         # Track VRAM after loading models
         mem_after, mem_reserved_after = track_vram_usage("model_load_end")
@@ -444,6 +464,7 @@ async def cleanup_models_if_needed(orchestrator: BaseOrchestrator, deep_cleanup:
             _log.warning(f"Failed to close ONNX sessions: {e}")
 
         # Step 4: Clear converters and explicitly delete cache entries
+        _log.info("Clearing orchestrator converters...")
         await orchestrator.clear_converters()
 
         # Also try to manually clear the cache dictionary
@@ -451,16 +472,52 @@ async def cleanup_models_if_needed(orchestrator: BaseOrchestrator, deep_cleanup:
             if hasattr(orchestrator, 'cm') and hasattr(orchestrator.cm, '_get_converter_from_hash'):
                 cache = orchestrator.cm._get_converter_from_hash
                 if hasattr(cache, 'cache'):
-                    _log.info(f"Manually clearing {len(cache.cache)} cached converters...")
+                    cache_size = len(cache.cache)
+                    _log.info(f"Manually clearing {cache_size} cached converters...")
                     # Delete each converter explicitly
                     for key in list(cache.cache.keys()):
                         try:
+                            converter = cache.cache[key]
+                            # Try to move converter to CPU before deletion
+                            if hasattr(converter, 'to'):
+                                converter.to('cpu')
                             del cache.cache[key]
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            _log.debug(f"Failed to clear converter {key}: {e}")
                     cache.cache.clear()
+                    _log.info("Cache dictionary cleared")
+                else:
+                    _log.info("No cache attribute found")
+            else:
+                _log.info("No converter manager found")
         except Exception as e:
             _log.debug(f"Manual cache clear: {e}")
+
+        # Step 4b: Try to clear any other potential model caches
+        try:
+            _log.info("Attempting to clear additional model caches...")
+            import gc
+
+            # Look for any objects that might hold model references
+            for obj_name in dir(orchestrator):
+                if 'model' in obj_name.lower() or 'cache' in obj_name.lower():
+                    try:
+                        obj = getattr(orchestrator, obj_name)
+                        if hasattr(obj, 'clear'):
+                            _log.debug(f"Clearing {obj_name}")
+                            obj.clear()
+                        elif hasattr(obj, 'reset'):
+                            _log.debug(f"Resetting {obj_name}")
+                            obj.reset()
+                    except Exception as e:
+                        _log.debug(f"Failed to clear {obj_name}: {e}")
+
+            # Force garbage collection again
+            gc.collect()
+            gc.collect()
+
+        except Exception as e:
+            _log.debug(f"Additional cache clearing failed: {e}")
 
         # Step 5: Force aggressive garbage collection
         _log.info("Running aggressive garbage collection...")
@@ -1649,10 +1706,14 @@ def create_app():  # noqa: C901
     async def deep_vram_cleanup(
         auth: Annotated[AuthenticationResult, Depends(require_auth)],
         orchestrator: Annotated[BaseOrchestrator, Depends(get_async_orchestrator)],
+        force: bool = False,
     ):
         """
         Perform a deep VRAM cleanup. This endpoint can be used to manually trigger
         aggressive VRAM cleanup when standard cleanup is not effective.
+
+        Parameters:
+        - force: Force cleanup even if minimal VRAM is allocated
         """
         if not docling_serve_settings.free_vram_on_idle:
             raise HTTPException(
@@ -1660,8 +1721,98 @@ def create_app():  # noqa: C901
                 detail="Deep VRAM cleanup requires DOCLING_SERVE_FREE_VRAM_ON_IDLE=True"
             )
 
-        _log.info("Manual deep VRAM cleanup requested via API")
-        await cleanup_models_if_needed(orchestrator, deep_cleanup=True)
+        _log.info(f"Manual deep VRAM cleanup requested via API (force={force})")
+
+        # Temporarily bypass the minimal VRAM check if force is True
+        if force:
+            # Temporarily modify the function to skip the minimal VRAM check
+            import functools
+            original_cleanup = cleanup_models_if_needed
+
+            async def forced_cleanup(orchestrator_ref, deep_cleanup_ref=False):
+                # Store original settings
+                original_free_vram = docling_serve_settings.free_vram_on_idle
+
+                # Force cleanup
+                await original_cleanup(orchestrator_ref, deep_cleanup_ref=deep_cleanup_ref)
+
+                # Restore original settings
+                docling_serve_settings.free_vram_on_idle = original_free_vram
+
+            await forced_cleanup(orchestrator, deep_cleanup=True)
+        else:
+            await cleanup_models_if_needed(orchestrator, deep_cleanup=True)
+
         return ClearResponse()
+
+    # VRAM status check
+    @app.get(
+        "/v1/status/vram",
+        tags=["status"],
+        response_model=dict,
+    )
+    async def vram_status(
+        auth: Annotated[AuthenticationResult, Depends(require_auth)],
+        orchestrator: Annotated[BaseOrchestrator, Depends(get_async_orchestrator)],
+    ):
+        """
+        Get current VRAM status and model cache information for debugging.
+        """
+        try:
+            import torch
+            if not torch.cuda.is_available():
+                return {"error": "CUDA not available"}
+
+            # Get VRAM info
+            allocated = torch.cuda.memory_allocated() / 1024**2
+            reserved = torch.cuda.memory_reserved() / 1024**2
+            total = torch.cuda.get_device_properties(0).total_memory / 1024**2
+
+            # Get model cache info
+            model_status = "unknown"
+            cache_size = 0
+            try:
+                if hasattr(orchestrator, 'cm') and hasattr(orchestrator.cm, '_get_converter_from_hash'):
+                    cache = orchestrator.cm._get_converter_from_hash
+                    if hasattr(cache, 'cache_info'):
+                        cache_info = cache.cache_info()
+                        model_status = f"cache_hits: {cache_info.hits}, misses: {cache_info.misses}, size: {cache_info.currsize}"
+                        cache_size = cache_info.currsize
+                    elif hasattr(cache, 'cache'):
+                        model_status = f"cached converters: {len(cache.cache)}"
+                        cache_size = len(cache.cache)
+                    else:
+                        model_status = "cache structure unknown"
+                else:
+                    model_status = "no converter manager found"
+            except Exception as e:
+                model_status = f"status check failed: {e}"
+
+            # Get VRAM history
+            history_summary = []
+            if len(_vram_usage_history) > 0:
+                recent = _vram_usage_history[-5:]  # Last 5 entries
+                history_summary = [
+                    {
+                        "context": h["context"],
+                        "allocated_mb": round(h["allocated"], 2),
+                        "reserved_mb": round(h["reserved"], 2)
+                    }
+                    for h in recent
+                ]
+
+            return {
+                "vram_allocated_mb": round(allocated, 2),
+                "vram_reserved_mb": round(reserved, 2),
+                "vram_total_mb": round(total, 2),
+                "vram_free_mb": round(total - reserved, 2),
+                "model_status": model_status,
+                "cache_size": cache_size,
+                "recent_history": history_summary,
+                "free_vram_on_idle": docling_serve_settings.free_vram_on_idle
+            }
+
+        except Exception as e:
+            return {"error": f"Failed to get VRAM status: {e}"}
 
     return app
