@@ -140,7 +140,33 @@ def _worker_process_entry(
             # Convert documents using the converter
             results = []
             for source in task_data.sources:
-                conv_result = converter.convert(source, options=task_data.convert_options)
+                # Handle different source types
+                if hasattr(source, 'path') and hasattr(source, 'kind'):
+                    # This is a FileSourceRequest object, extract the path
+                    if hasattr(source, 'base64_data') and source.base64_data:
+                        # For base64 data, we need to decode and write to temp file
+                        import base64
+                        import tempfile
+                        import os
+                        from pathlib import Path
+
+                        # Decode base64 and write to temporary file
+                        file_data = base64.b64decode(source.base64_data)
+                        with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as temp_file:
+                            temp_file.write(file_data)
+                            temp_path = temp_file.name
+
+                        try:
+                            conv_result = converter.convert(temp_path)
+                        finally:
+                            # Clean up temp file
+                            os.unlink(temp_path)
+                    else:
+                        # For path-based sources, use the path directly
+                        conv_result = converter.convert(source.path)
+                else:
+                    # Assume source is already a path or string
+                    conv_result = converter.convert(source)
                 results.append(conv_result)
             result = results
 
@@ -148,13 +174,33 @@ def _worker_process_entry(
             # Chunk documents
             results = []
             for source in task_data.sources:
-                # Convert and chunk
-                conv_result = converter.convert(
-                    source,
-                    options=task_data.convert_options,
-                    chunking_options=task_data.chunking_options,
-                    chunking_export_options=task_data.chunking_export_options
-                )
+                # Handle different source types
+                if hasattr(source, 'path') and hasattr(source, 'kind'):
+                    # This is a FileSourceRequest object, extract the path
+                    if hasattr(source, 'base64_data') and source.base64_data:
+                        # For base64 data, we need to decode and write to temp file
+                        import base64
+                        import tempfile
+                        import os
+                        from pathlib import Path
+
+                        # Decode base64 and write to temporary file
+                        file_data = base64.b64decode(source.base64_data)
+                        with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as temp_file:
+                            temp_file.write(file_data)
+                            temp_path = temp_file.name
+
+                        try:
+                            conv_result = converter.convert(temp_path)
+                        finally:
+                            # Clean up temp file
+                            os.unlink(temp_path)
+                    else:
+                        # For path-based sources, use the path directly
+                        conv_result = converter.convert(source.path)
+                else:
+                    # Assume source is already a path or string
+                    conv_result = converter.convert(source)
                 results.append(conv_result)
             result = results
         else:
