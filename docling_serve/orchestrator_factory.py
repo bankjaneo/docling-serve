@@ -303,12 +303,19 @@ def get_async_orchestrator() -> BaseOrchestrator:
             )
 
             # Convert cm_config to dict for worker processes
-            # Use model_dump() for robust dict conversion (Pydantic v2)
+            # Use model_dump() with mode='json' to ensure all values are JSON-serializable
+            # This handles enums, paths, and other complex types that can't be pickled
             try:
-                cm_config_dict = cm_config.model_dump()
-            except AttributeError:
-                # Fallback for Pydantic v1
-                cm_config_dict = cm_config.dict()
+                # Pydantic v2
+                cm_config_dict = cm_config.model_dump(mode='json')
+            except (AttributeError, TypeError):
+                try:
+                    # Pydantic v1
+                    cm_config_dict = cm_config.dict()
+                except Exception:
+                    # Manual fallback - convert to primitives
+                    import json
+                    cm_config_dict = json.loads(cm_config.model_dump_json() if hasattr(cm_config, 'model_dump_json') else cm_config.json())
 
             return VRAMWorkerOrchestrator(
                 config=vram_config,
