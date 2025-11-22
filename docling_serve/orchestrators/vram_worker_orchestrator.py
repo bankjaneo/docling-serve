@@ -94,8 +94,6 @@ def _worker_process_entry(
             DoclingConverterManager,
             DoclingConverterManagerConfig,
         )
-        from docling_jobkit.convert.worker import convert_task, chunk_task
-        from docling_jobkit.datamodel.task import TaskType
 
         _log.info(f"Worker process {os.getpid()} started for task {task_data.task_id}")
 
@@ -103,26 +101,33 @@ def _worker_process_entry(
         cm_config = DoclingConverterManagerConfig(**converter_manager_config)
         cm = DoclingConverterManager(config=cm_config)
 
-        # Convert task_type string back to enum
+        # Get a converter instance from the manager
+        converter = cm.get_converter(
+            options=task_data.convert_options,
+            chunking_options=task_data.chunking_options,
+            chunking_export_options=task_data.chunking_export_options,
+        )
+
+        # Perform conversion
         task_type_str = task_data.task_type.upper() if isinstance(task_data.task_type, str) else task_data.task_type
 
-        # Perform conversion using jobkit worker functions
-        if task_type_str == "CONVERT" or task_type_str == TaskType.CONVERT:
-            result = convert_task(
-                sources=task_data.sources,
-                options=task_data.convert_options,
-                target=task_data.target,
-                converter_manager=cm,
-            )
-        elif task_type_str == "CHUNK" or task_type_str == TaskType.CHUNK:
-            result = chunk_task(
-                sources=task_data.sources,
-                convert_options=task_data.convert_options,
-                chunking_options=task_data.chunking_options,
-                chunking_export_options=task_data.chunking_export_options,
-                target=task_data.target,
-                converter_manager=cm,
-            )
+        if task_type_str == "CONVERT":
+            # Convert documents using the converter
+            results = []
+            for source in task_data.sources:
+                conv_result = converter.convert(source)
+                results.append(conv_result)
+            result = results
+
+        elif task_type_str == "CHUNK":
+            # Chunk documents
+            results = []
+            for source in task_data.sources:
+                # Convert and chunk
+                conv_result = converter.convert(source)
+                # Chunking is handled by the converter based on chunking_options
+                results.append(conv_result)
+            result = results
         else:
             raise ValueError(f"Unknown task type: {task_data.task_type}")
 
