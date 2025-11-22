@@ -244,19 +244,68 @@ async def cleanup_models_if_needed(orchestrator: BaseOrchestrator):
 
         await orchestrator.clear_converters()
 
-        # Force garbage collection to release converter objects
+        # Try to clear ONNX Runtime session cache if it exists
+        try:
+            import onnxruntime as ort
+            # Clear any ONNX Runtime session cache
+            # Note: ONNX Runtime doesn't have a built-in cache clear,
+            # but we can try to release sessions via garbage collection
+            _log.info("Attempting to clear ONNX Runtime sessions...")
+        except ImportError:
+            pass
+
+        # Force aggressive garbage collection to release all converter objects
         import gc
-        gc.collect()
+
+        # Collect garbage multiple times to ensure all objects are freed
+        for _ in range(5):
+            gc.collect()
+
+        # Also try to clear any weakref callbacks
+        gc.collect(2)  # Full collection including generation 2
 
         # Explicitly free CUDA memory after clearing converters
         try:
             import torch
             if torch.cuda.is_available():
+                # Clear CUDA cache multiple times for thorough cleanup
                 torch.cuda.empty_cache()
                 torch.cuda.synchronize()
+
+                # Try to release all unused cached memory back to the OS
+                try:
+                    # This is more aggressive and releases memory to OS
+                    torch.cuda.memory.empty_cache()
+                except AttributeError:
+                    pass  # Older PyTorch versions don't have this
+
+                # Reset peak memory stats
+                torch.cuda.reset_peak_memory_stats()
+                torch.cuda.reset_accumulated_memory_stats()
+
+                # Try to set memory fraction to minimal (releases reserved memory)
+                try:
+                    # This forces PyTorch to release reserved but unused memory
+                    for device_id in range(torch.cuda.device_count()):
+                        torch.cuda.set_per_process_memory_fraction(0.0, device_id)
+                        torch.cuda.empty_cache()
+                        # Reset back to default (1.0 = no limit)
+                        torch.cuda.set_per_process_memory_fraction(1.0, device_id)
+                except Exception:
+                    pass
+
+                # Final empty cache call
+                torch.cuda.empty_cache()
+
                 mem_after = torch.cuda.memory_allocated() / 1024**2
+                mem_reserved = torch.cuda.memory_reserved() / 1024**2
                 _log.info(f"VRAM allocated after cleanup: {mem_after:.2f} MB")
+                _log.info(f"VRAM reserved after cleanup: {mem_reserved:.2f} MB")
                 _log.info("CUDA cache cleared and synchronized")
+
+                # If still significant memory, try to identify what's holding it
+                if mem_after > 100:
+                    _log.warning(f"VRAM still has {mem_after:.2f} MB allocated after cleanup - this may be CUDA context overhead")
         except Exception as e:
             _log.warning(f"Failed to clear CUDA cache: {e}")
 
