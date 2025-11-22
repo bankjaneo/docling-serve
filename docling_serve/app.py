@@ -241,8 +241,8 @@ async def ensure_models_loaded(orchestrator: BaseOrchestrator):
         await orchestrator.warm_up_caches()
 
 
-# WorkerOrchestrator handles VRAM cleanup automatically by terminating processes
-# No explicit cleanup needed when using WorkerOrchestrator
+# SimpleWorkerOrchestrator and WorkerOrchestrator handle VRAM cleanup automatically by terminating processes
+# No explicit cleanup needed when using worker-based orchestrators
 
 
 async def cleanup_models_after_task(orchestrator: BaseOrchestrator, task_id: str):
@@ -255,9 +255,9 @@ async def cleanup_models_after_task(orchestrator: BaseOrchestrator, task_id: str
     if not docling_serve_settings.free_vram_on_idle:
         return
 
-    # WorkerOrchestrator handles VRAM cleanup automatically by terminating worker processes
+    # SimpleWorkerOrchestrator and WorkerOrchestrator handle VRAM cleanup automatically by terminating worker processes
     if hasattr(orchestrator, '_active_workers'):
-        _log.debug(f"Task {task_id} completed - WorkerOrchestrator handles VRAM cleanup automatically")
+        _log.debug(f"Task {task_id} completed - Worker-based orchestrator handles VRAM cleanup automatically")
         return
 
     # Fallback to standard cleanup for other orchestrators
@@ -274,9 +274,9 @@ async def cleanup_models_background(orchestrator: BaseOrchestrator, task_id: str
     if not docling_serve_settings.free_vram_on_idle:
         return
 
-    # WorkerOrchestrator handles VRAM cleanup automatically by terminating worker processes
+    # SimpleWorkerOrchestrator and WorkerOrchestrator handle VRAM cleanup automatically by terminating worker processes
     if hasattr(orchestrator, '_active_workers'):
-        _log.debug(f"Background cleanup for task {task_id} - WorkerOrchestrator handles VRAM cleanup automatically")
+        _log.debug(f"Background cleanup for task {task_id} - Worker-based orchestrator handles VRAM cleanup automatically")
         return
 
     # Fallback for other orchestrators (may not be fully effective)

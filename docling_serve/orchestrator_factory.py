@@ -15,13 +15,26 @@ from docling_jobkit.orchestrators.base_orchestrator import (
 from docling_serve.settings import AsyncEngine, docling_serve_settings
 from docling_serve.storage import get_scratch
 
-# Import WorkerOrchestrator for VRAM isolation
+# Import VRAMWorkerOrchestrator for VRAM isolation (minimal dependencies)
+try:
+    from docling_serve.vram_worker_orchestrator import VRAMWorkerOrchestrator
+    _log.info("VRAMWorkerOrchestrator imported successfully")
+except ImportError as e:
+    VRAMWorkerOrchestrator = None
+    _log = logging.getLogger(__name__)
+    _log.error(f"VRAMWorkerOrchestrator import failed: {e}")
+    _log.warning("VRAMWorkerOrchestrator not available - falling back to standard orchestrators")
+
+# Try to import other worker orchestrators as fallback
+try:
+    from docling_serve.simple_worker_orchestrator import SimpleWorkerOrchestrator
+except ImportError:
+    SimpleWorkerOrchestrator = None
+
 try:
     from docling_serve.worker_orchestrator import WorkerOrchestrator
 except ImportError:
     WorkerOrchestrator = None
-    _log = logging.getLogger(__name__)
-    _log.warning("WorkerOrchestrator not available - falling back to standard orchestrators")
 
 _log = logging.getLogger(__name__)
 
@@ -273,7 +286,20 @@ class RedisTaskStatusMixin:
 
 @lru_cache
 def get_async_orchestrator() -> BaseOrchestrator:
-    # Use WorkerOrchestrator for complete VRAM cleanup when free_vram_on_idle is enabled
+    # Debug logging for orchestrator selection
+    _log.info(f"Orchestrator selection - free_vram_on_idle: {docling_serve_settings.free_vram_on_idle}")
+    _log.info(f"Orchestrator selection - VRAMWorkerOrchestrator available: {VRAMWorkerOrchestrator is not None}")
+
+    # Use VRAMWorkerOrchestrator for complete VRAM cleanup when free_vram_on_idle is enabled
+    if docling_serve_settings.free_vram_on_idle and VRAMWorkerOrchestrator is not None:
+        _log.info("Using VRAMWorkerOrchestrator for complete VRAM isolation")
+        return VRAMWorkerOrchestrator()
+
+    # Fallback to other worker orchestrators if VRAMWorkerOrchestrator not available
+    if docling_serve_settings.free_vram_on_idle and SimpleWorkerOrchestrator is not None:
+        _log.info("Using SimpleWorkerOrchestrator for complete VRAM isolation")
+        return SimpleWorkerOrchestrator()
+
     if docling_serve_settings.free_vram_on_idle and WorkerOrchestrator is not None:
         _log.info("Using WorkerOrchestrator for complete VRAM isolation")
         return WorkerOrchestrator()
