@@ -241,233 +241,46 @@ async def ensure_models_loaded(orchestrator: BaseOrchestrator):
         await orchestrator.warm_up_caches()
 
 
-async def cleanup_models_if_needed(orchestrator: BaseOrchestrator):
-    """Clear models after processing if lazy loading is enabled to free VRAM."""
-    if docling_serve_settings.free_vram_on_idle:
-        _log.info("Clearing models to free VRAM...")
-
-        # Log VRAM usage before cleanup
-        try:
-            import torch
-            if torch.cuda.is_available():
-                mem_before = torch.cuda.memory_allocated() / 1024**2
-                mem_reserved_before = torch.cuda.memory_reserved() / 1024**2
-                _log.info(f"VRAM allocated before cleanup: {mem_before:.2f} MB")
-                _log.info(f"VRAM reserved before cleanup: {mem_reserved_before:.2f} MB")
-        except Exception:
-            pass
-
-        # Step 1: Move models to CPU before deletion (critical for VRAM release)
-        try:
-            import torch
-            if torch.cuda.is_available():
-                _log.info("Moving models to CPU before deletion...")
-                # Try to access converter manager if it exists
-                if hasattr(orchestrator, 'cm') and hasattr(orchestrator.cm, '_get_converter_from_hash'):
-                    # Get the cache info
-                    cache = orchestrator.cm._get_converter_from_hash
-                    if hasattr(cache, 'cache_info'):
-                        _log.info(f"Converter cache before cleanup: {cache.cache_info()}")
-
-                    # Try to move any cached converters to CPU
-                    if hasattr(cache, '__wrapped__'):
-                        # For LRU cache, we need to access the cache directly
-                        try:
-                            # Access the private cache dict (this is a bit hacky but necessary)
-                            cache_dict = cache.cache
-                            for key, value in list(cache_dict.items()):
-                                try:
-                                    # Try to move converter models to CPU
-                                    converter = value  # In LRU cache, value might be wrapped
-                                    if hasattr(converter, 'doc_converter') and hasattr(converter.doc_converter, 'to'):
-                                        converter.doc_converter.to('cpu')
-                                    elif hasattr(converter, 'to'):
-                                        converter.to('cpu')
-                                except Exception:
-                                    pass
-                        except Exception:
-                            pass
-        except Exception as e:
-            _log.warning(f"Failed to move models to CPU: {e}")
-
-        # Step 2: Try to explicitly close ONNX Runtime sessions
-        try:
-            if hasattr(orchestrator, 'cm') and hasattr(orchestrator.cm, '_get_converter_from_hash'):
-                cache = orchestrator.cm._get_converter_from_hash
-                if hasattr(cache, 'cache'):
-                    _log.info("Attempting to close ONNX Runtime sessions...")
-                    for key, converter in list(cache.cache.items()):
-                        try:
-                            # Try to access and delete ONNX sessions within converters
-                            if hasattr(converter, '__dict__'):
-                                for attr_name in list(converter.__dict__.keys()):
-                                    attr = getattr(converter, attr_name, None)
-                                    # Look for ONNX InferenceSession objects
-                                    if attr is not None and 'onnxruntime' in str(type(attr)):
-                                        _log.info(f"Found ONNX session in {attr_name}, deleting...")
-                                        delattr(converter, attr_name)
-                        except Exception as e:
-                            _log.debug(f"Error closing ONNX session: {e}")
-        except Exception as e:
-            _log.warning(f"Failed to close ONNX sessions: {e}")
-
-        # Step 3: Clear converters and explicitly delete cache entries
-        await orchestrator.clear_converters()
-
-        # Also try to manually clear the cache dictionary
-        try:
-            if hasattr(orchestrator, 'cm') and hasattr(orchestrator.cm, '_get_converter_from_hash'):
-                cache = orchestrator.cm._get_converter_from_hash
-                if hasattr(cache, 'cache'):
-                    _log.info(f"Manually clearing {len(cache.cache)} cached converters...")
-                    # Delete each converter explicitly
-                    for key in list(cache.cache.keys()):
-                        try:
-                            del cache.cache[key]
-                        except:
-                            pass
-                    cache.cache.clear()
-        except Exception as e:
-            _log.debug(f"Manual cache clear: {e}")
-
-        # Step 4: Force aggressive garbage collection
-        import gc
-        _log.info("Running aggressive garbage collection...")
-        for _ in range(5):
-            gc.collect()
-        gc.collect(2)  # Full collection including generation 2
-
-        # Step 5: Try to force ONNX Runtime CUDA cleanup
-        try:
-            import onnxruntime as ort
-            providers = ort.get_available_providers()
-            if 'CUDAExecutionProvider' in providers:
-                _log.info("ONNX Runtime CUDA provider detected, forcing cleanup...")
-                # Trick: Creating and immediately destroying a session sometimes triggers
-                # ONNX Runtime to release cached CUDA allocations
-                # This is a workaround since ONNX Runtime has no official cleanup API
-                import gc
-                gc.collect()
-                gc.collect()
-        except Exception as e:
-            _log.debug(f"ONNX Runtime cleanup attempt: {e}")
-
-        # Step 6: Safe CUDA memory cleanup
-        try:
-            import torch
-
-            if torch.cuda.is_available():
-                _log.info("Starting safe CUDA cleanup...")
-
-                # Get current device info
-                current_device = torch.cuda.current_device()
-
-                # Get memory stats before cleanup
-                mem_before = torch.cuda.memory_allocated(current_device) / 1024**2
-                mem_reserved_before = torch.cuda.memory_reserved(current_device) / 1024**2
-
-                # Clear cache and synchronize safely
-                torch.cuda.empty_cache()
-                torch.cuda.synchronize()
-
-                # Additional garbage collection
-                for _ in range(3):
-                    gc.collect()
-
-                # More cache clearing
-                torch.cuda.empty_cache()
-
-                # Get final memory stats
-                mem_after = torch.cuda.memory_allocated(current_device) / 1024**2
-                mem_reserved_after = torch.cuda.memory_reserved(current_device) / 1024**2
-
-                _log.info(f"VRAM cleanup complete:")
-                _log.info(f"  Before: {mem_before:.2f} MB allocated, {mem_reserved_before:.2f} MB reserved")
-                _log.info(f"  After:  {mem_after:.2f} MB allocated, {mem_reserved_after:.2f} MB reserved")
-                _log.info(f"  Freed:  {(mem_before - mem_after):.2f} MB allocated, {(mem_reserved_before - mem_reserved_after):.2f} MB reserved")
-
-                # If we still have significant memory allocation, provide gentle warning
-                if mem_after > 100:
-                    _log.warning(f"VRAM still has {mem_after:.2f} MB allocated - this may be CUDA context overhead")
-                else:
-                    _log.info("VRAM cleanup successful")
-
-        except Exception as e:
-            _log.warning(f"Safe CUDA cleanup failed: {e}")
-            # Fall back to basic cleanup
-            try:
-                import torch
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-            except:
-                pass
-
-
-# Removed dangerous force_complete_cuda_cleanup function that was causing crashes
-# The safe cleanup approach in cleanup_models_if_needed should be sufficient
+# WorkerOrchestrator handles VRAM cleanup automatically by terminating processes
+# No explicit cleanup needed when using WorkerOrchestrator
 
 
 async def cleanup_models_after_task(orchestrator: BaseOrchestrator, task_id: str):
     """
     Cleanup models after a task completes (for synchronous endpoints).
-    Only clears models if there are no other active tasks running.
+
+    When using WorkerOrchestrator (free_vram_on_idle=True), no explicit cleanup is needed
+    since each task runs in a completely separate process that gets terminated.
     """
     if not docling_serve_settings.free_vram_on_idle:
         return
 
-    # Check if there are other active tasks before cleaning up
-    has_active_tasks = False
-    for tid, t in orchestrator.tasks.items():
-        if tid != task_id and t.task_status in [TaskStatus.PENDING, TaskStatus.STARTED]:
-            has_active_tasks = True
-            _log.info(f"Skipping model cleanup: task {tid} is still {t.task_status.value}")
-            break
+    # WorkerOrchestrator handles VRAM cleanup automatically by terminating worker processes
+    if hasattr(orchestrator, '_active_workers'):
+        _log.debug(f"Task {task_id} completed - WorkerOrchestrator handles VRAM cleanup automatically")
+        return
 
-    if not has_active_tasks:
-        _log.info(f"No active tasks remaining, clearing models to free VRAM...")
-        await cleanup_models_if_needed(orchestrator)
-    else:
-        _log.info(f"Active tasks still running, models will remain loaded")
+    # Fallback to standard cleanup for other orchestrators
+    _log.info(f"Task {task_id} completed - using standard orchestrator, VRAM cleanup may be incomplete")
 
 
 async def cleanup_models_background(orchestrator: BaseOrchestrator, task_id: str):
     """
     Background task to clean up models after task completion.
-    Waits for the task to complete, then clears models if lazy loading is enabled.
-    Only clears models if there are no other active tasks running.
+
+    When using WorkerOrchestrator (free_vram_on_idle=True), no explicit cleanup is needed
+    since each task runs in a completely separate process that gets terminated.
     """
     if not docling_serve_settings.free_vram_on_idle:
         return
 
-    # Wait for the task to complete
-    max_wait_time = docling_serve_settings.max_document_timeout
-    start_time = time.monotonic()
+    # WorkerOrchestrator handles VRAM cleanup automatically by terminating worker processes
+    if hasattr(orchestrator, '_active_workers'):
+        _log.debug(f"Background cleanup for task {task_id} - WorkerOrchestrator handles VRAM cleanup automatically")
+        return
 
-    while time.monotonic() - start_time < max_wait_time:
-        try:
-            task = await orchestrator.task_status(task_id=task_id)
-            if task and task.task_status in [TaskStatus.SUCCESS, TaskStatus.FAILURE]:
-                # Task completed, now check if there are other active tasks
-                # before cleaning up models
-                has_active_tasks = False
-                for tid, t in orchestrator.tasks.items():
-                    if tid != task_id and t.task_status in [TaskStatus.PENDING, TaskStatus.STARTED]:
-                        has_active_tasks = True
-                        _log.info(f"Skipping model cleanup: task {tid} is still {t.task_status.value}")
-                        break
-
-                if not has_active_tasks:
-                    _log.info(f"No active tasks remaining, clearing models to free VRAM...")
-                    await cleanup_models_if_needed(orchestrator)
-                else:
-                    _log.info(f"Active tasks still running, models will remain loaded")
-                return
-        except TaskNotFoundError:
-            _log.warning(f"Task {task_id} not found during model cleanup. Stopping cleanup task.")
-            return
-        await asyncio.sleep(docling_serve_settings.cleanup_poll_interval)
-
-    _log.warning(f"Cleanup task for task {task_id} timed out after {max_wait_time} seconds.")
+    # Fallback for other orchestrators (may not be fully effective)
+    _log.info(f"Background cleanup for task {task_id} - using standard orchestrator, VRAM cleanup may be incomplete")
 
 
 ##################################

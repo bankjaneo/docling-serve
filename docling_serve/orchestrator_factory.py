@@ -15,6 +15,14 @@ from docling_jobkit.orchestrators.base_orchestrator import (
 from docling_serve.settings import AsyncEngine, docling_serve_settings
 from docling_serve.storage import get_scratch
 
+# Import WorkerOrchestrator for VRAM isolation
+try:
+    from docling_serve.worker_orchestrator import WorkerOrchestrator
+except ImportError:
+    WorkerOrchestrator = None
+    _log = logging.getLogger(__name__)
+    _log.warning("WorkerOrchestrator not available - falling back to standard orchestrators")
+
 _log = logging.getLogger(__name__)
 
 
@@ -265,6 +273,11 @@ class RedisTaskStatusMixin:
 
 @lru_cache
 def get_async_orchestrator() -> BaseOrchestrator:
+    # Use WorkerOrchestrator for complete VRAM cleanup when free_vram_on_idle is enabled
+    if docling_serve_settings.free_vram_on_idle and WorkerOrchestrator is not None:
+        _log.info("Using WorkerOrchestrator for complete VRAM isolation")
+        return WorkerOrchestrator()
+
     if docling_serve_settings.eng_kind == AsyncEngine.LOCAL:
         from docling_jobkit.convert.manager import (
             DoclingConverterManager,
