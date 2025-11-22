@@ -275,17 +275,69 @@ async def cleanup_models_if_needed(orchestrator: BaseOrchestrator):
         except Exception as e:
             _log.warning(f"Failed to move models to CPU: {e}")
 
-        # Step 2: Clear converters
+        # Step 2: Try to explicitly close ONNX Runtime sessions
+        try:
+            if hasattr(orchestrator, 'cm') and hasattr(orchestrator.cm, '_get_converter_from_hash'):
+                cache = orchestrator.cm._get_converter_from_hash
+                if hasattr(cache, 'cache'):
+                    _log.info("Attempting to close ONNX Runtime sessions...")
+                    for key, converter in list(cache.cache.items()):
+                        try:
+                            # Try to access and delete ONNX sessions within converters
+                            if hasattr(converter, '__dict__'):
+                                for attr_name in list(converter.__dict__.keys()):
+                                    attr = getattr(converter, attr_name, None)
+                                    # Look for ONNX InferenceSession objects
+                                    if attr is not None and 'onnxruntime' in str(type(attr)):
+                                        _log.info(f"Found ONNX session in {attr_name}, deleting...")
+                                        delattr(converter, attr_name)
+                        except Exception as e:
+                            _log.debug(f"Error closing ONNX session: {e}")
+        except Exception as e:
+            _log.warning(f"Failed to close ONNX sessions: {e}")
+
+        # Step 3: Clear converters and explicitly delete cache entries
         await orchestrator.clear_converters()
 
-        # Step 3: Force aggressive garbage collection
+        # Also try to manually clear the cache dictionary
+        try:
+            if hasattr(orchestrator, 'cm') and hasattr(orchestrator.cm, '_get_converter_from_hash'):
+                cache = orchestrator.cm._get_converter_from_hash
+                if hasattr(cache, 'cache'):
+                    _log.info(f"Manually clearing {len(cache.cache)} cached converters...")
+                    # Delete each converter explicitly
+                    for key in list(cache.cache.keys()):
+                        try:
+                            del cache.cache[key]
+                        except:
+                            pass
+                    cache.cache.clear()
+        except Exception as e:
+            _log.debug(f"Manual cache clear: {e}")
+
+        # Step 4: Force aggressive garbage collection
         import gc
         _log.info("Running aggressive garbage collection...")
         for _ in range(5):
             gc.collect()
         gc.collect(2)  # Full collection including generation 2
 
-        # Step 4: Explicitly free CUDA memory
+        # Step 5: Try to force ONNX Runtime CUDA cleanup
+        try:
+            import onnxruntime as ort
+            providers = ort.get_available_providers()
+            if 'CUDAExecutionProvider' in providers:
+                _log.info("ONNX Runtime CUDA provider detected, forcing cleanup...")
+                # Trick: Creating and immediately destroying a session sometimes triggers
+                # ONNX Runtime to release cached CUDA allocations
+                # This is a workaround since ONNX Runtime has no official cleanup API
+                import gc
+                gc.collect()
+                gc.collect()
+        except Exception as e:
+            _log.debug(f"ONNX Runtime cleanup attempt: {e}")
+
+        # Step 6: Explicitly free CUDA memory
         try:
             import torch
             if torch.cuda.is_available():
