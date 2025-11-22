@@ -235,6 +235,29 @@ async def cleanup_models_if_needed(orchestrator: BaseOrchestrator):
         await orchestrator.clear_converters()
 
 
+async def cleanup_models_after_task(orchestrator: BaseOrchestrator, task_id: str):
+    """
+    Cleanup models after a task completes (for synchronous endpoints).
+    Only clears models if there are no other active tasks running.
+    """
+    if not docling_serve_settings.free_vram_on_idle:
+        return
+
+    # Check if there are other active tasks before cleaning up
+    has_active_tasks = False
+    for tid, t in orchestrator.tasks.items():
+        if tid != task_id and t.task_status in [TaskStatus.PENDING, TaskStatus.STARTED]:
+            has_active_tasks = True
+            _log.info(f"Skipping model cleanup: task {tid} is still {t.task_status.value}")
+            break
+
+    if not has_active_tasks:
+        _log.info(f"No active tasks remaining, clearing models to free VRAM...")
+        await cleanup_models_if_needed(orchestrator)
+    else:
+        _log.info(f"Active tasks still running, models will remain loaded")
+
+
 async def cleanup_models_background(orchestrator: BaseOrchestrator, task_id: str):
     """
     Background task to clean up models after task completion.
@@ -626,6 +649,9 @@ def create_app():  # noqa: C901
                 detail=f"Conversion is taking too long. The maximum wait time is configure as DOCLING_SERVE_MAX_SYNC_WAIT={docling_serve_settings.max_sync_wait}.",
             )
 
+        # Cleanup models after task completion if no other tasks are running
+        await cleanup_models_after_task(orchestrator, task.task_id)
+
         task_result = await orchestrator.task_result(task_id=task.task_id)
         if task_result is None:
             raise HTTPException(
@@ -682,6 +708,9 @@ def create_app():  # noqa: C901
                 status_code=504,
                 detail=f"Conversion is taking too long. The maximum wait time is configure as DOCLING_SERVE_MAX_SYNC_WAIT={docling_serve_settings.max_sync_wait}.",
             )
+
+        # Cleanup models after task completion if no other tasks are running
+        await cleanup_models_after_task(orchestrator, task.task_id)
 
         task_result = await orchestrator.task_result(task_id=task.task_id)
         if task_result is None:
@@ -886,6 +915,9 @@ def create_app():  # noqa: C901
                     detail=f"Conversion is taking too long. The maximum wait time is configure as DOCLING_SERVE_MAX_SYNC_WAIT={docling_serve_settings.max_sync_wait}.",
                 )
 
+            # Cleanup models after task completion if no other tasks are running
+            await cleanup_models_after_task(orchestrator, task.task_id)
+
             task_result = await orchestrator.task_result(task_id=task.task_id)
             if task_result is None:
                 raise HTTPException(
@@ -968,6 +1000,9 @@ def create_app():  # noqa: C901
                     status_code=504,
                     detail=f"Conversion is taking too long. The maximum wait time is configure as DOCLING_SERVE_MAX_SYNC_WAIT={docling_serve_settings.max_sync_wait}.",
                 )
+
+            # Cleanup models after task completion if no other tasks are running
+            await cleanup_models_after_task(orchestrator, task.task_id)
 
             task_result = await orchestrator.task_result(task_id=task.task_id)
             if task_result is None:
