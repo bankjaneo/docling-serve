@@ -550,38 +550,82 @@ async def cleanup_models_if_needed(orchestrator: BaseOrchestrator, deep_cleanup:
 
                 for i, ocr in enumerate(rapidocr_instances):
                     try:
-                        _log.debug(f"Cleaning RapidOCR instance {i}")
+                        _log.info(f"Cleaning RapidOCR instance {i}: {type(ocr)}")
+
+                        # Deep search for any ONNX sessions in this RapidOCR instance
+                        onnx_sessions = find_onnx_sessions(ocr, f"RapidOCR[{i}]")
+                        if onnx_sessions:
+                            _log.info(f"Found {len(onnx_sessions)} ONNX sessions in RapidOCR instance {i}")
+                            for session_info in onnx_sessions:
+                                try:
+                                    session = session_info['session']
+                                    location = session_info['location']
+                                    _log.info(f"Closing ONNX session: {location}")
+
+                                    # Try different cleanup methods
+                                    if hasattr(session, 'close'):
+                                        session.close()
+                                    elif hasattr(session, 'finalize'):
+                                        session.finalize()
+                                    elif hasattr(session, '__del__'):
+                                        session.__del__()
+
+                                    # Force delete reference
+                                    if session_info['can_delete']:
+                                        delattr(session_info['parent'], session_info['attr_name'])
+                                        _log.info(f"Deleted reference to {session_info['attr_name']}")
+
+                                except Exception as e:
+                                    _log.warning(f"Failed to close ONNX session {location}: {e}")
+
+                        # Standard RapidOCR cleanup
                         if hasattr(ocr, 'text_detector') and ocr.text_detector:
                             if hasattr(ocr.text_detector, 'session'):
-                                _log.debug(f"Closing text_detector session")
-                                ocr.text_detector.session = None
+                                _log.info(f"Closing text_detector session in RapidOCR instance {i}")
+                                try:
+                                    ocr.text_detector.session = None
+                                except Exception as e:
+                                    _log.warning(f"Failed to clear text_detector session: {e}")
 
                         if hasattr(ocr, 'text_classifier') and ocr.text_classifier:
                             if hasattr(ocr.text_classifier, 'session'):
-                                _log.debug(f"Closing text_classifier session")
-                                ocr.text_classifier.session = None
+                                _log.info(f"Closing text_classifier session in RapidOCR instance {i}")
+                                try:
+                                    ocr.text_classifier.session = None
+                                except Exception as e:
+                                    _log.warning(f"Failed to clear text_classifier session: {e}")
 
                         if hasattr(ocr, 'text_recognizer') and ocr.text_recognizer:
                             if hasattr(ocr.text_recognizer, 'session'):
-                                _log.debug(f"Closing text_recognizer session")
-                                ocr.text_recognizer.session = None
-
-                        # Clear all attributes
-                        if hasattr(ocr, '__dict__'):
-                            for attr_name in list(ocr.__dict__.keys()):
+                                _log.info(f"Closing text_recognizer session in RapidOCR instance {i}")
                                 try:
+                                    ocr.text_recognizer.session = None
+                                except Exception as e:
+                                    _log.warning(f"Failed to clear text_recognizer session: {e}")
+
+                        # Clear all attributes more aggressively
+                        if hasattr(ocr, '__dict__'):
+                            attr_names = list(ocr.__dict__.keys())
+                            _log.info(f"Clearing {len(attr_names)} attributes from RapidOCR instance {i}")
+                            for attr_name in attr_names:
+                                try:
+                                    attr_value = getattr(ocr, attr_name)
+                                    if 'onnx' in str(type(attr_value)).lower() or 'session' in str(type(attr_value)).lower():
+                                        _log.debug(f"Found ONNX-related attribute {attr_name}: {type(attr_value)}")
                                     delattr(ocr, attr_name)
-                                except Exception:
-                                    pass
+                                except Exception as e:
+                                    _log.debug(f"Failed to clear attribute {attr_name}: {e}")
 
                     except Exception as e:
-                        _log.debug(f"Failed to clean RapidOCR instance {i}: {e}")
+                        _log.warning(f"Failed to clean RapidOCR instance {i}: {e}")
 
-                # Force garbage collection
-                gc.collect()
+                # Force garbage collection multiple times
+                _log.info("Running garbage collection after RapidOCR cleanup...")
+                for _ in range(5):
+                    gc.collect()
 
             except Exception as e:
-                _log.debug(f"Failed to clean global RapidOCR instances: {e}")
+                _log.warning(f"Failed to clean global RapidOCR instances: {e}")
 
         except Exception as e:
             _log.warning(f"Failed to close ONNX sessions: {e}")
@@ -844,7 +888,60 @@ async def cleanup_models_if_needed(orchestrator: BaseOrchestrator, deep_cleanup:
                         except Exception as e:
                             _log.debug(f"CUDA context reinitialization failed: {e}")
 
-                        # Method 3: Try to force CUDA memory pool reset (advanced)
+                        # Method 3: Global ONNX Runtime session hunt (most aggressive)
+                        try:
+                            _log.info("Starting global ONNX Runtime session hunt...")
+                            import gc
+
+                            # Search ALL objects for ONNX Runtime sessions
+                            all_objects = gc.get_objects()
+                            total_onnx_sessions = 0
+                            cleaned_sessions = 0
+
+                            for obj in all_objects:
+                                try:
+                                    obj_type = str(type(obj))
+                                    if 'onnxruntime' in obj_type and ('InferenceSession' in obj_type or 'Session' in obj_type):
+                                        total_onnx_sessions += 1
+
+                                        # Try multiple cleanup methods
+                                        cleanup_successful = False
+                                        try:
+                                            if hasattr(obj, 'close'):
+                                                obj.close()
+                                                cleanup_successful = True
+                                            elif hasattr(obj, 'finalize'):
+                                                obj.finalize()
+                                                cleanup_successful = True
+                                            elif hasattr(obj, '__del__'):
+                                                obj.__del__()
+                                                cleanup_successful = True
+                                        except Exception as e:
+                                            _log.debug(f"Failed to cleanup ONNX session: {e}")
+
+                                        if cleanup_successful:
+                                            cleaned_sessions += 1
+
+                                        # Force delete reference (this is tricky since we don't know the parent)
+                                        # But we can try to force garbage collection to collect it
+                                        try:
+                                            del obj
+                                        except Exception:
+                                            pass
+
+                                except Exception:
+                                    pass
+
+                            _log.info(f"Global ONNX hunt: Found {total_onnx_sessions} sessions, cleaned {cleaned_sessions}")
+
+                            # Force garbage collection after global hunt
+                            for _ in range(5):
+                                gc.collect()
+
+                        except Exception as e:
+                            _log.warning(f"Failed global ONNX Runtime session hunt: {e}")
+
+                        # Method 4: Try to force CUDA memory pool reset (advanced)
                         try:
                             _log.info("Attempting CUDA memory pool reset...")
 
