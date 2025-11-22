@@ -232,7 +232,33 @@ async def cleanup_models_if_needed(orchestrator: BaseOrchestrator):
     """Clear models after processing if lazy loading is enabled to free VRAM."""
     if docling_serve_settings.free_vram_on_idle:
         _log.info("Clearing models to free VRAM...")
+
+        # Log VRAM usage before cleanup
+        try:
+            import torch
+            if torch.cuda.is_available():
+                mem_before = torch.cuda.memory_allocated() / 1024**2
+                _log.info(f"VRAM allocated before cleanup: {mem_before:.2f} MB")
+        except Exception:
+            pass
+
         await orchestrator.clear_converters()
+
+        # Force garbage collection to release converter objects
+        import gc
+        gc.collect()
+
+        # Explicitly free CUDA memory after clearing converters
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+                mem_after = torch.cuda.memory_allocated() / 1024**2
+                _log.info(f"VRAM allocated after cleanup: {mem_after:.2f} MB")
+                _log.info("CUDA cache cleared and synchronized")
+        except Exception as e:
+            _log.warning(f"Failed to clear CUDA cache: {e}")
 
 
 async def cleanup_models_after_task(orchestrator: BaseOrchestrator, task_id: str):
