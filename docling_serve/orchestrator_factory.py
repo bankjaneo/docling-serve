@@ -15,13 +15,14 @@ from docling_jobkit.orchestrators.base_orchestrator import (
 from docling_serve.settings import AsyncEngine, docling_serve_settings
 from docling_serve.storage import get_scratch
 
+_log = logging.getLogger(__name__)
+
 # Import VRAMWorkerOrchestrator for VRAM isolation (minimal dependencies)
 try:
     from docling_serve.vram_worker_orchestrator import VRAMWorkerOrchestrator
     _log.info("VRAMWorkerOrchestrator imported successfully")
 except ImportError as e:
     VRAMWorkerOrchestrator = None
-    _log = logging.getLogger(__name__)
     _log.error(f"VRAMWorkerOrchestrator import failed: {e}")
     _log.warning("VRAMWorkerOrchestrator not available - falling back to standard orchestrators")
 
@@ -35,8 +36,6 @@ try:
     from docling_serve.worker_orchestrator import WorkerOrchestrator
 except ImportError:
     WorkerOrchestrator = None
-
-_log = logging.getLogger(__name__)
 
 
 class RedisTaskStatusMixin:
