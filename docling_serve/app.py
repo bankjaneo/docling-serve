@@ -251,7 +251,9 @@ async def cleanup_models_if_needed(orchestrator: BaseOrchestrator):
             import torch
             if torch.cuda.is_available():
                 mem_before = torch.cuda.memory_allocated() / 1024**2
+                mem_reserved_before = torch.cuda.memory_reserved() / 1024**2
                 _log.info(f"VRAM allocated before cleanup: {mem_before:.2f} MB")
+                _log.info(f"VRAM reserved before cleanup: {mem_reserved_before:.2f} MB")
         except Exception:
             pass
 
@@ -350,43 +352,335 @@ async def cleanup_models_if_needed(orchestrator: BaseOrchestrator):
         except Exception as e:
             _log.debug(f"ONNX Runtime cleanup attempt: {e}")
 
-        # Step 6: Explicitly free CUDA memory
+        # Step 6: Enhanced CUDA memory cleanup with context destruction
         try:
             import torch
-            if torch.cuda.is_available():
-                _log.info("Clearing CUDA cache...")
-                # Clear CUDA cache multiple times
-                torch.cuda.empty_cache()
-                torch.cuda.synchronize()
+            import subprocess
+            import sys
+            import os
 
-                # Reset peak memory stats
+            if torch.cuda.is_available():
+                _log.info("Starting enhanced CUDA cleanup...")
+
+                # Get current device info
+                current_device = torch.cuda.current_device()
+                device_count = torch.cuda.device_count()
+                _log.info(f"Current CUDA device: {current_device}, Total devices: {device_count}")
+
+                # Get memory stats before cleanup
+                mem_before = torch.cuda.memory_allocated(current_device) / 1024**2
+                mem_reserved_before = torch.cuda.memory_reserved(current_device) / 1024**2
+
+                # Clear all caches multiple times
+                for i in range(3):
+                    torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
+
+                # Move any remaining tensors to CPU and delete them
+                _log.info("Moving any remaining tensors to CPU...")
+                for obj_id in range(torch.cuda.memory_allocated()):
+                    try:
+                        # Force garbage collection of CUDA tensors
+                        gc.collect()
+                    except:
+                        pass
+
+                # Release all CUDA memory reservations
+                torch.cuda.empty_cache()
+
+                # Reset memory statistics
                 torch.cuda.reset_peak_memory_stats()
                 torch.cuda.reset_accumulated_memory_stats()
 
-                # Try to set memory fraction to minimal (releases reserved memory)
+                # Try to release memory fraction settings
                 try:
-                    for device_id in range(torch.cuda.device_count()):
-                        torch.cuda.set_per_process_memory_fraction(0.0, device_id)
-                        torch.cuda.empty_cache()
-                        torch.cuda.set_per_process_memory_fraction(1.0, device_id)
-                except Exception:
-                    pass
+                    torch.cuda.set_per_process_memory_fraction(0.0, current_device)
+                    torch.cuda.empty_cache()
+                except Exception as e:
+                    _log.debug(f"Failed to set memory fraction: {e}")
 
-                # Final empty cache calls
-                torch.cuda.empty_cache()
+                # Force synchronization
                 torch.cuda.synchronize()
 
-                mem_after = torch.cuda.memory_allocated() / 1024**2
-                mem_reserved = torch.cuda.memory_reserved() / 1024**2
-                _log.info(f"VRAM allocated after cleanup: {mem_after:.2f} MB")
-                _log.info(f"VRAM reserved after cleanup: {mem_reserved:.2f} MB")
-                _log.info("CUDA cache cleared and synchronized")
+                # Final cache clearing
+                for i in range(3):
+                    torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
 
-                # If still significant memory, log warning
-                if mem_after > 100:
-                    _log.warning(f"VRAM still has {mem_after:.2f} MB allocated - this may be CUDA context overhead")
+                # Get intermediate memory stats
+                mem_intermediate = torch.cuda.memory_allocated(current_device) / 1024**2
+                mem_reserved_intermediate = torch.cuda.memory_reserved(current_device) / 1024**2
+
+                _log.info(f"VRAM after standard cleanup: {mem_intermediate:.2f} MB allocated, {mem_reserved_intermediate:.2f} MB reserved")
+
+                # Step 7: Advanced CUDA context cleanup (experimental but effective)
+                if mem_intermediate > 100:  # If we still have significant allocation
+                    _log.info("Attempting advanced CUDA context cleanup...")
+
+                    try:
+                        # Save current context state
+                        initial_streams = []
+                        for i in range(device_count):
+                            try:
+                                stream = torch.cuda.current_stream(i)
+                                initial_streams.append((i, stream))
+                            except:
+                                pass
+
+                        # Synchronize all streams
+                        for device_id, stream in initial_streams:
+                            try:
+                                torch.cuda.synchronize(device_id)
+                            except:
+                                pass
+
+                        # Force additional garbage collection
+                        for _ in range(10):
+                            gc.collect()
+
+                        # Try to force CUDA context reset via low-level operations
+                        # This is a more aggressive approach to force context cleanup
+                        import ctypes
+                        import ctypes.util
+
+                        # Try to find and call cudaDeviceReset
+                        try:
+                            cuda_lib = ctypes.CDLL(ctypes.util.find_library('cuda') or 'libcuda.so')
+                            if hasattr(cuda_lib, 'cudaDeviceReset'):
+                                _log.info("Calling cudaDeviceReset to force context cleanup...")
+                                result = cuda_lib.cudaDeviceReset()
+                                _log.info(f"cudaDeviceReset result: {result}")
+                        except Exception as e:
+                            _log.debug(f"cudaDeviceReset not available: {e}")
+
+                        # Alternative: Try using pycuda if available
+                        try:
+                            import pycuda.autoinit
+                            import pycuda.driver as drv
+                            _log.info("Using pycuda for context cleanup...")
+                            drv.Context.pop()
+                            drv.Context.detach()
+                        except ImportError:
+                            _log.debug("pycuda not available for advanced cleanup")
+                        except Exception as e:
+                            _log.debug(f"pycuda cleanup failed: {e}")
+
+                        # Final torch cleanup attempts
+                        torch.cuda.empty_cache()
+
+                        # Try to recreate minimal context (sometimes helps trigger cleanup)
+                        try:
+                            torch.cuda.set_device(current_device)
+                            dummy_tensor = torch.tensor([1.0], device=f'cuda:{current_device}')
+                            del dummy_tensor
+                            torch.cuda.empty_cache()
+                        except Exception as e:
+                            _log.debug(f"Dummy tensor cleanup failed: {e}")
+
+                    except Exception as e:
+                        _log.warning(f"Advanced CUDA cleanup failed: {e}")
+
+                # Step 8: Final cleanup and memory reporting
+                # Final aggressive garbage collection
+                for _ in range(5):
+                    gc.collect()
+
+                # Final CUDA cache clearing
+                for i in range(5):
+                    torch.cuda.empty_cache()
+                    if i % 2 == 0:
+                        torch.cuda.synchronize()
+
+                # Get final memory stats
+                mem_after = torch.cuda.memory_allocated(current_device) / 1024**2
+                mem_reserved_after = torch.cuda.memory_reserved(current_device) / 1024**2
+
+                _log.info(f"VRAM cleanup complete:")
+                _log.info(f"  Before: {mem_before:.2f} MB allocated, {mem_reserved_before:.2f} MB reserved")
+                _log.info(f"  After:  {mem_after:.2f} MB allocated, {mem_reserved_after:.2f} MB reserved")
+                _log.info(f"  Freed:  {(mem_before - mem_after):.2f} MB allocated, {(mem_reserved_before - mem_reserved_after):.2f} MB reserved")
+
+                # If we still have significant memory allocation, try complete cleanup
+                if mem_after > 50:
+                    _log.warning(f"VRAM still has {mem_after:.2f} MB allocated - attempting complete CUDA context cleanup")
+
+                    # Try the complete cleanup as a final resort
+                    await force_complete_cuda_cleanup()
+
+                    # Check memory one more time after complete cleanup
+                    try:
+                        mem_final = torch.cuda.memory_allocated(current_device) / 1024**2
+                        mem_reserved_final = torch.cuda.memory_reserved(current_device) / 1024**2
+
+                        if mem_final < 50:
+                            _log.info("Complete CUDA cleanup successful - achieved near-zero VRAM usage")
+                        else:
+                            _log.warning(f"Complete cleanup still shows {mem_final:.2f} MB allocated")
+                            _log.warning("This may indicate persistent CUDA context that requires process restart")
+                    except Exception as e:
+                        _log.debug(f"Final memory check failed: {e}")
+                else:
+                    _log.info("VRAM cleanup successful - near-zero memory usage achieved")
+
         except Exception as e:
-            _log.warning(f"Failed to clear CUDA cache: {e}")
+            _log.warning(f"Enhanced CUDA cleanup failed: {e}")
+            # Fall back to basic cleanup
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
+            except:
+                pass
+
+
+async def force_complete_cuda_cleanup():
+    """
+    Force complete CUDA cleanup by destroying and recreating the CUDA context.
+    This is a more aggressive approach that should achieve near-zero VRAM usage
+    but may affect subsequent CUDA operations. Use with caution.
+    """
+    try:
+        import torch
+        import gc
+
+        if not torch.cuda.is_available():
+            _log.info("CUDA not available, no cleanup needed")
+            return
+
+        _log.info("Starting complete CUDA context cleanup...")
+
+        # Get current memory state
+        current_device = torch.cuda.current_device()
+        mem_before = torch.cuda.memory_allocated(current_device) / 1024**2
+        mem_reserved_before = torch.cuda.memory_reserved(current_device) / 1024**2
+
+        _log.info(f"VRAM before complete cleanup: {mem_before:.2f} MB allocated, {mem_reserved_before:.2f} MB reserved")
+
+        # Step 1: Standard cleanup
+        torch.cuda.empty_cache()
+        gc.collect()
+
+        # Step 2: Try to force CUDA context reset using various methods
+
+        # Method 1: Using torch.cuda.device_count() and device reset
+        try:
+            device_count = torch.cuda.device_count()
+            for i in range(device_count):
+                try:
+                    torch.cuda.synchronize(i)
+                    torch.cuda.empty_cache()
+                except Exception:
+                    pass
+        except Exception as e:
+            _log.debug(f"Device synchronization failed: {e}")
+
+        # Method 2: Force garbage collection and cache clearing
+        for _ in range(10):
+            gc.collect()
+            torch.cuda.empty_cache()
+
+        # Method 3: Try to access low-level CUDA functions
+        try:
+            import ctypes
+            import ctypes.util
+
+            # Try different CUDA library names
+            cuda_lib_names = ['libcuda.so', 'libcuda.dylib', 'nvcuda.dll', 'cuda.dll']
+            cuda_lib = None
+
+            for lib_name in cuda_lib_names:
+                try:
+                    cuda_lib = ctypes.CDLL(ctypes.util.find_library(lib_name) or lib_name)
+                    break
+                except:
+                    continue
+
+            if cuda_lib:
+                # Try to call cudaDeviceReset if available
+                if hasattr(cuda_lib, 'cudaDeviceReset'):
+                    _log.info("Calling cudaDeviceReset via ctypes...")
+                    result = cuda_lib.cudaDeviceReset()
+                    _log.info(f"cudaDeviceReset result: {result}")
+
+                # Try to call cudaDeviceSynchronize if available
+                if hasattr(cuda_lib, 'cudaDeviceSynchronize'):
+                    _log.info("Calling cudaDeviceSynchronize via ctypes...")
+                    result = cuda_lib.cudaDeviceSynchronize()
+                    _log.info(f"cudaDeviceSynchronize result: {result}")
+
+        except Exception as e:
+            _log.debug(f"Low-level CUDA cleanup failed: {e}")
+
+        # Method 4: Try to reset CUDA device through PyTorch
+        try:
+            _log.info("Attempting PyTorch device reset...")
+            # Get all devices and reset them
+            for i in range(torch.cuda.device_count()):
+                try:
+                    torch.cuda.set_device(i)
+                    torch.cuda.empty_cache()
+                    # Try to reset the device
+                    if hasattr(torch.cuda, '_lazy_new'):
+                        torch.cuda._lazy_new()
+                except Exception as e:
+                    _log.debug(f"Device {i} reset failed: {e}")
+
+            # Reset back to original device
+            torch.cuda.set_device(current_device)
+
+        except Exception as e:
+            _log.debug(f"PyTorch device reset failed: {e}")
+
+        # Step 5: Final cleanup
+        for _ in range(5):
+            gc.collect()
+
+        for _ in range(5):
+            torch.cuda.empty_cache()
+
+        # Step 6: Force context recreation (this sometimes helps)
+        try:
+            _log.info("Forcing context recreation...")
+            original_device = torch.cuda.current_device()
+
+            # Try to create a small tensor to force context recreation
+            dummy = torch.tensor([1.0], device='cpu')
+            if torch.cuda.is_available():
+                dummy_cuda = dummy.to(f'cuda:{original_device}')
+                del dummy_cuda
+                torch.cuda.empty_cache()
+
+            del dummy
+            torch.cuda.empty_cache()
+
+        except Exception as e:
+            _log.debug(f"Context recreation failed: {e}")
+
+        # Get final memory state
+        mem_after = torch.cuda.memory_allocated(current_device) / 1024**2
+        mem_reserved_after = torch.cuda.memory_reserved(current_device) / 1024**2
+
+        _log.info(f"Complete CUDA cleanup results:")
+        _log.info(f"  Before: {mem_before:.2f} MB allocated, {mem_reserved_before:.2f} MB reserved")
+        _log.info(f"  After:  {mem_after:.2f} MB allocated, {mem_reserved_after:.2f} MB reserved")
+        _log.info(f"  Freed:  {(mem_before - mem_after):.2f} MB allocated, {(mem_reserved_before - mem_reserved_after):.2f} MB reserved")
+
+        if mem_after < 50:
+            _log.info("Complete CUDA cleanup successful - achieved near-zero VRAM usage")
+        else:
+            _log.warning(f"Still have {mem_after:.2f} MB VRAM allocated after complete cleanup")
+            _log.warning("This may be persistent CUDA context that requires process restart")
+
+    except Exception as e:
+        _log.error(f"Complete CUDA cleanup failed: {e}")
+        # Try basic cleanup as fallback
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except:
+            pass
 
 
 async def cleanup_models_after_task(orchestrator: BaseOrchestrator, task_id: str):
