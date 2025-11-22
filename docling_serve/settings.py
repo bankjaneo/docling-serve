@@ -3,7 +3,7 @@ import sys
 from pathlib import Path
 from typing import Optional, Union
 
-from pydantic import AnyUrl, model_validator
+from pydantic import AnyUrl, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing_extensions import Self
 
@@ -55,6 +55,14 @@ class DoclingServeSettings(BaseSettings):
     unload_ollama_base_url: Optional[str] = None
     unload_ollama_model: Optional[str] = None
     unload_llama_swap_base_url: Optional[str] = None
+
+    @field_validator("unload_ollama_base_url", "unload_llama_swap_base_url", mode="before")
+    @classmethod
+    def decode_url_if_bytes(cls, v):
+        """Decode URL if it comes in as bytes from environment variable."""
+        if isinstance(v, bytes):
+            return v.decode("utf-8")
+        return v
     unload_external_model_timeout: float = 10.0  # seconds
     enable_remote_services: bool = False
     allow_external_plugins: bool = False

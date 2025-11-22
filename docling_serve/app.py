@@ -184,10 +184,19 @@ async def unload_external_models():
 
 async def _unload_llama_swap(base_url: str):
     """Unload models from llama-swap by calling the /unload endpoint."""
+    # Handle case where base_url comes in as bytes from environment variable
+    if isinstance(base_url, bytes):
+        base_url = base_url.decode("utf-8")
+
     # Parse URL to extract only scheme and netloc, stripping any path components
     # This handles cases where users include /v1 or other paths in the base URL
     parsed = httpx.URL(base_url)
-    clean_base_url = f"{parsed.scheme}://{parsed.netloc}"
+
+    # Handle case where parsed components come as bytes
+    scheme = parsed.scheme.decode() if isinstance(parsed.scheme, bytes) else parsed.scheme
+    netloc = parsed.netloc.decode() if isinstance(parsed.netloc, bytes) else parsed.netloc
+
+    clean_base_url = f"{scheme}://{netloc}"
     url = f"{clean_base_url}/unload"
 
     try:
@@ -204,6 +213,10 @@ async def _unload_llama_swap(base_url: str):
 
 async def _unload_ollama(base_url: str, model_name: str):
     """Unload models from Ollama by setting keep_alive to 0."""
+    # Handle case where base_url comes in as bytes from environment variable
+    if isinstance(base_url, bytes):
+        base_url = base_url.decode("utf-8")
+
     url = f"{base_url.rstrip('/')}/api/generate"
     payload = {"model": model_name, "keep_alive": 0}
     try:
