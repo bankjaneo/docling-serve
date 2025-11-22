@@ -239,6 +239,7 @@ async def cleanup_models_background(orchestrator: BaseOrchestrator, task_id: str
     """
     Background task to clean up models after task completion.
     Waits for the task to complete, then clears models if lazy loading is enabled.
+    Only clears models if there are no other active tasks running.
     """
     if not docling_serve_settings.free_vram_on_idle:
         return
@@ -251,8 +252,20 @@ async def cleanup_models_background(orchestrator: BaseOrchestrator, task_id: str
         try:
             task = await orchestrator.task_status(task_id=task_id)
             if task and task.task_status in [TaskStatus.SUCCESS, TaskStatus.FAILURE]:
-                # Task completed, now cleanup models
-                await cleanup_models_if_needed(orchestrator)
+                # Task completed, now check if there are other active tasks
+                # before cleaning up models
+                has_active_tasks = False
+                for tid, t in orchestrator.tasks.items():
+                    if tid != task_id and t.task_status in [TaskStatus.PENDING, TaskStatus.STARTED]:
+                        has_active_tasks = True
+                        _log.info(f"Skipping model cleanup: task {tid} is still {t.task_status.value}")
+                        break
+
+                if not has_active_tasks:
+                    _log.info(f"No active tasks remaining, clearing models to free VRAM...")
+                    await cleanup_models_if_needed(orchestrator)
+                else:
+                    _log.info(f"Active tasks still running, models will remain loaded")
                 return
         except TaskNotFoundError:
             _log.warning(f"Task {task_id} not found during model cleanup. Stopping cleanup task.")
