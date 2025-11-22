@@ -48,15 +48,20 @@ class VRAMWorkerOrchestratorConfig:
 
 @dataclass
 class WorkerTask:
-    """Task data for worker process."""
+    """
+    Task data for worker process.
+
+    Note: This will be serialized to JSON for inter-process communication,
+    so all fields must be JSON-serializable (no enums, complex objects, etc.)
+    """
 
     task_id: str
-    task_type: TaskType
+    task_type: str  # TaskType as string (e.g., "convert", "chunk")
     sources: list[Any]
     convert_options: Optional[dict[str, Any]]
-    chunking_options: Optional[BaseChunkerOptions]
-    chunking_export_options: Optional[ChunkingExportOptions]
-    target: Optional[Any]
+    chunking_options: Optional[dict[str, Any]]  # Serialized to dict
+    chunking_export_options: Optional[dict[str, Any]]  # Serialized to dict
+    target: Optional[dict[str, Any]]  # Serialized to dict
     converter_manager_config: dict[str, Any]
 
 
@@ -89,6 +94,7 @@ def _worker_process_entry(
             DoclingConverterManager,
             DoclingConverterManagerConfig,
         )
+        from docling_jobkit.datamodel.task import TaskType
 
         _log.info(f"Worker process {os.getpid()} started for task {task_data.task_id}")
 
@@ -96,19 +102,31 @@ def _worker_process_entry(
         cm_config = DoclingConverterManagerConfig(**converter_manager_config)
         cm = DoclingConverterManager(config=cm_config)
 
+        # Convert task_type string back to enum
+        task_type_str = task_data.task_type.upper() if isinstance(task_data.task_type, str) else task_data.task_type
+
         # Perform conversion
-        if task_data.task_type == TaskType.CONVERT:
+        if task_type_str == "CONVERT" or task_type_str == TaskType.CONVERT:
             result = cm.convert(
                 sources=task_data.sources,
                 options=task_data.convert_options,
                 target=task_data.target,
             )
-        elif task_data.task_type == TaskType.CHUNK:
+        elif task_type_str == "CHUNK" or task_type_str == TaskType.CHUNK:
+            # Deserialize chunking options if needed
+            from docling_jobkit.datamodel.chunking import (
+                BaseChunkerOptions,
+                ChunkingExportOptions,
+            )
+
+            chunking_opts = task_data.chunking_options
+            chunking_export_opts = task_data.chunking_export_options
+
             result = cm.chunk(
                 sources=task_data.sources,
                 convert_options=task_data.convert_options,
-                chunking_options=task_data.chunking_options,
-                chunking_export_options=task_data.chunking_export_options,
+                chunking_options=chunking_opts,
+                chunking_export_options=chunking_export_opts,
                 target=task_data.target,
             )
         else:
@@ -279,15 +297,40 @@ class VRAMWorkerOrchestrator(BaseOrchestrator):
         )
         self.tasks[task_id] = task
 
-        # Create worker task data
+        # Serialize complex objects to JSON-safe formats
+        # This ensures everything can be pickled for multiprocessing
+        def _serialize_to_dict(obj):
+            """Convert Pydantic models and other objects to JSON-safe dicts."""
+            if obj is None:
+                return None
+            if hasattr(obj, 'model_dump'):
+                # Pydantic v2
+                try:
+                    return obj.model_dump(mode='json')
+                except Exception:
+                    return obj.model_dump()
+            elif hasattr(obj, 'dict'):
+                # Pydantic v1
+                return obj.dict()
+            elif isinstance(obj, dict):
+                return obj
+            else:
+                # Try to convert to dict
+                import json
+                try:
+                    return json.loads(json.dumps(obj, default=str))
+                except Exception:
+                    return obj
+
+        # Create worker task data with serialized options
         worker_task = WorkerTask(
             task_id=task_id,
-            task_type=task_type,
+            task_type=task_type.value if hasattr(task_type, 'value') else str(task_type),
             sources=sources,
             convert_options=convert_options,
-            chunking_options=chunking_options,
-            chunking_export_options=chunking_export_options,
-            target=target,
+            chunking_options=_serialize_to_dict(chunking_options),
+            chunking_export_options=_serialize_to_dict(chunking_export_options),
+            target=_serialize_to_dict(target),
             converter_manager_config=self.converter_manager_config,
         )
 
