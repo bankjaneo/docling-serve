@@ -63,7 +63,7 @@ services:
       # DOCLING_SERVE_UNLOAD_OLLAMA_MODEL: llama3.2-vision
 
       # External Model Unloading (llama-swap)
-      # DOCLING_SERVE_UNLOAD_LLAMA_SWAP_BASE_URL: http://llama-swap:8080
+      DOCLING_SERVE_UNLOAD_LLAMA_SWAP_BASE_URL: http://172.17.0.1:9292
 
       DOCLING_SERVE_UNLOAD_EXTERNAL_MODEL_TIMEOUT: 10.0
 
