@@ -103,8 +103,8 @@ def _worker_process_entry(
         cm = DoclingConverterManager(config=cm_config)
 
         # Get a converter instance from the manager
-        # Extract pdf_format_option from convert_options if available, otherwise default to PdfBackend.DLOCR
-        pdf_format_option = PdfBackend.DLOCR  # Default to DLOCR
+        # Extract pdf_format_option from convert_options if available, otherwise default to PdfBackend.DLPARSE_V4
+        pdf_format_option = PdfBackend.DLPARSE_V4  # Default to DLPARSE_V4
         if task_data.convert_options and 'pdf_backend' in task_data.convert_options:
             pdf_backend_str = task_data.convert_options['pdf_backend']
             # Convert string to PdfBackend enum
