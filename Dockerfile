@@ -1,111 +1,49 @@
-# Multi-stage Dockerfile for Docling Serve with CUDA 12.8 support
-# Build with: docker build -t docling-serve:cuda128 .
+# Optimized Dockerfile for Docling Serve with CUDA 12.8 support
+# Based on official Containerfile approach for minimal image size
+# Build with: docker build --build-arg UV_SYNC_EXTRA_ARGS="--no-group pypi --group cu128" -t docling-serve:cuda128 .
 
-# Stage 1: UV Builder
-FROM ghcr.io/astral-sh/uv:0.8.19 AS uv
+ARG BASE_IMAGE=quay.io/sclorg/python-312-c9s:c9s
+ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.8.19
+ARG UV_SYNC_EXTRA_ARGS=""
 
-# Stage 2: Build stage
-FROM nvidia/cuda:12.8.0-runtime-ubuntu24.04 AS builder
+###################################################################################################
+# UV Stage - Extract UV binary for temporary mounting                                            #
+###################################################################################################
 
-# Install UV from first stage
-COPY --from=uv /uv /usr/local/bin/uv
+FROM ${UV_IMAGE} AS uv_stage
 
-# Set environment variables for build
-ENV DEBIAN_FRONTEND=noninteractive \
+###################################################################################################
+# Main Build Stage                                                                                #
+###################################################################################################
+
+FROM ${BASE_IMAGE} AS docling-base
+
+# Switch to root for system package installation
+USER 0
+
+# Install system dependencies from os-packages.txt
+RUN --mount=type=bind,source=os-packages.txt,target=/tmp/os-packages.txt \
+    dnf -y install --best --nodocs --setopt=install_weak_deps=False dnf-plugins-core && \
+    dnf config-manager --best --nodocs --setopt=install_weak_deps=False --save && \
+    dnf config-manager --enable crb && \
+    dnf -y update && \
+    dnf install -y $(cat /tmp/os-packages.txt) && \
+    dnf -y clean all && \
+    rm -rf /var/cache/dnf
+
+# Fix permissions for cache directory
+RUN /usr/bin/fix-permissions /opt/app-root/src/.cache
+
+# Set environment variables
+ENV TESSDATA_PREFIX=/usr/share/tesseract/tessdata/ \
+    OMP_NUM_THREADS=4 \
     LANG=en_US.UTF-8 \
     LC_ALL=en_US.UTF-8 \
     PYTHONIOENCODING=utf-8 \
-    PATH="/opt/app-root/bin:$PATH" \
     UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
     UV_PROJECT_ENVIRONMENT=/opt/app-root \
-    HF_HUB_DOWNLOAD_TIMEOUT=90 \
-    HF_HUB_ETAG_TIMEOUT=90
-
-# Install system dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3.12 \
-    python3.12-dev \
-    python3.12-venv \
-    python3-pip \
-    tesseract-ocr \
-    tesseract-ocr-eng \
-    libtesseract-dev \
-    libleptonica-dev \
-    libglvnd0 \
-    libgl1 \
-    libglib2.0-0 \
-    git \
-    curl \
-    ca-certificates \
-    locales \
-    && locale-gen en_US.UTF-8 \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
-
-# Create app directory and user
-RUN mkdir -p /opt/app-root/src && \
-    groupadd -g 1001 appuser && \
-    useradd -r -u 1001 -g appuser -d /opt/app-root -s /sbin/nologin appuser && \
-    python3.12 -m venv /opt/app-root && \
-    chown -R 1001:1001 /opt/app-root
-
-WORKDIR /opt/app-root/src
-
-# Copy dependency files
-COPY --chown=1001:1001 pyproject.toml uv.lock ./
-
-# Install dependencies with CUDA 12.8 support
-# Use --no-group pypi --group cu128 to install CUDA 12.8 PyTorch
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev --no-group pypi --group cu128 --extra easyocr --extra tesserocr --extra rapidocr --extra ui --python python3.12
-
-# Copy application code
-COPY --chown=1001:1001 docling_serve ./docling_serve
-
-# Download model weights at build time
-RUN --mount=type=cache,target=/root/.cache/huggingface \
-    /opt/app-root/bin/python -c "from docling.models import download_models_hf; download_models_hf()" || true
-
-# Stage 3: Runtime stage
-FROM nvidia/cuda:12.8.0-runtime-ubuntu24.04 AS runtime
-
-# Install runtime dependencies only
-ENV DEBIAN_FRONTEND=noninteractive \
-    LANG=en_US.UTF-8 \
-    LC_ALL=en_US.UTF-8 \
-    PYTHONIOENCODING=utf-8
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3.12 \
-    tesseract-ocr \
-    tesseract-ocr-eng \
-    libtesseract5 \
-    libglvnd0 \
-    libgl1 \
-    libglib2.0-0 \
-    ca-certificates \
-    locales \
-    && locale-gen en_US.UTF-8 \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
-
-# Create app directory and user
-RUN mkdir -p /opt/app-root/src && \
-    groupadd -g 1001 appuser && \
-    useradd -r -u 1001 -g appuser -d /opt/app-root -s /sbin/nologin appuser && \
-    chown -R 1001:1001 /opt/app-root
-
-# Copy application and dependencies from builder
-COPY --from=builder --chown=1001:1001 /opt/app-root /opt/app-root
-
-WORKDIR /opt/app-root/src
-
-# Set runtime environment variables with defaults from docs/configuration.md
-ENV PATH="/opt/app-root/bin:$PATH" \
-    PYTHONPATH="/opt/app-root/src" \
-    OMP_NUM_THREADS=4 \
-    TESSDATA_PREFIX=/usr/share/tesseract-ocr/5/tessdata/ \
+    DOCLING_SERVE_ARTIFACTS_PATH=/opt/app-root/src/.cache/docling/models \
     # Uvicorn Web Server Configuration
     UVICORN_HOST=0.0.0.0 \
     UVICORN_PORT=5001 \
@@ -144,17 +82,57 @@ ENV PATH="/opt/app-root/bin:$PATH" \
     DOCLING_SERVE_ENG_LOC_SHARE_MODELS=False \
     # HuggingFace Configuration
     HF_HUB_DOWNLOAD_TIMEOUT=90 \
-    HF_HUB_ETAG_TIMEOUT=90
+    HF_HUB_ETAG_TIMEOUT=90 \
+    PATH="/opt/app-root/bin:$PATH" \
+    PYTHONPATH="/opt/app-root/src"
 
-# Switch to non-root user
+# Switch to non-root user for application setup
 USER 1001
+
+WORKDIR /opt/app-root/src
+
+# Build argument for CUDA group selection
+ARG UV_SYNC_EXTRA_ARGS
+
+# Install Python dependencies with two-phase approach for flash-attention
+# Phase 1: Install all dependencies except flash-attn
+# Phase 2: Install flash-attn with special build flags to skip CUDA compilation
+RUN --mount=from=uv_stage,source=/uv,target=/bin/uv \
+    --mount=type=cache,target=/opt/app-root/src/.cache/uv,uid=1001 \
+    --mount=type=bind,source=uv.lock,target=uv.lock \
+    --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
+    umask 002 && \
+    UV_SYNC_ARGS="--frozen --no-install-project --no-dev --all-extras" && \
+    uv sync ${UV_SYNC_ARGS} ${UV_SYNC_EXTRA_ARGS} --no-extra flash-attn && \
+    FLASH_ATTENTION_SKIP_CUDA_BUILD=TRUE uv sync ${UV_SYNC_ARGS} ${UV_SYNC_EXTRA_ARGS} --no-build-isolation-package=flash-attn
+
+# Download models explicitly using docling-tools
+# This ensures all required models are preloaded in the image
+ARG MODELS_LIST="layout tableformer picture_classifier rapidocr easyocr"
+
+RUN echo "Downloading models..." && \
+    HF_HUB_DOWNLOAD_TIMEOUT="90" \
+    HF_HUB_ETAG_TIMEOUT="90" \
+    docling-tools models download -o "${DOCLING_SERVE_ARTIFACTS_PATH}" ${MODELS_LIST} && \
+    chown -R 1001:0 ${DOCLING_SERVE_ARTIFACTS_PATH} && \
+    chmod -R g=u ${DOCLING_SERVE_ARTIFACTS_PATH}
+
+# Copy application code
+COPY --chown=1001:0 ./docling_serve ./docling_serve
+
+# Final sync to install the project itself
+RUN --mount=from=uv_stage,source=/uv,target=/bin/uv \
+    --mount=type=cache,target=/opt/app-root/src/.cache/uv,uid=1001 \
+    --mount=type=bind,source=uv.lock,target=uv.lock \
+    --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
+    umask 002 && uv sync --frozen --no-dev --all-extras ${UV_SYNC_EXTRA_ARGS}
 
 # Expose the default port
 EXPOSE 5001
 
-# Health check
+# Health check (enhancement over official Containerfile)
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD python3.12 -c "import urllib.request; urllib.request.urlopen('http://localhost:5001/health').read()" || exit 1
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:5001/health').read()" || exit 1
 
 # Run the application
 CMD ["docling-serve", "run"]
