@@ -2,7 +2,9 @@ import asyncio
 import copy
 import importlib.metadata
 import logging
+import os
 import shutil
+import signal
 import time
 from contextlib import asynccontextmanager
 from io import BytesIO
@@ -116,6 +118,13 @@ for handler in root_logger.handlers:  # Iterate through existing handlers
         handler.setFormatter(ColoredLogFormatter(handler.formatter._fmt))
 
 _log = logging.getLogger(__name__)
+
+
+# Task counter for auto-restart functionality
+# When DOCLING_SERVE_MAX_TASKS_BEFORE_RESTART is set and free_vram_on_idle is enabled,
+# the server will automatically restart after processing N tasks to ensure complete VRAM cleanup
+_task_counter = 0
+_max_tasks_before_restart = int(os.getenv("DOCLING_SERVE_MAX_TASKS_BEFORE_RESTART", "0"))
 
 
 # Context manager to initialize and clean up the lifespan of the FastAPI app
@@ -251,151 +260,339 @@ async def cleanup_models_if_needed(orchestrator: BaseOrchestrator):
             import torch
             if torch.cuda.is_available():
                 mem_before = torch.cuda.memory_allocated() / 1024**2
+                mem_reserved_before = torch.cuda.memory_reserved() / 1024**2
                 _log.info(f"VRAM allocated before cleanup: {mem_before:.2f} MB")
+                _log.info(f"VRAM reserved before cleanup: {mem_reserved_before:.2f} MB")
         except Exception:
             pass
 
-        # Step 1: Move models to CPU before deletion (critical for VRAM release)
+        # Step 1: Explicitly delete all model references and move to CPU
         try:
             import torch
             if torch.cuda.is_available():
-                _log.info("Moving models to CPU before deletion...")
-                # Try to access converter manager if it exists
+                _log.info("Moving models to CPU and deleting references...")
+
                 if hasattr(orchestrator, 'cm') and hasattr(orchestrator.cm, '_get_converter_from_hash'):
-                    # Get the cache info
                     cache = orchestrator.cm._get_converter_from_hash
                     if hasattr(cache, 'cache_info'):
                         _log.info(f"Converter cache before cleanup: {cache.cache_info()}")
 
-                    # Try to move any cached converters to CPU
-                    if hasattr(cache, '__wrapped__'):
-                        # For LRU cache, we need to access the cache directly
-                        try:
-                            # Access the private cache dict (this is a bit hacky but necessary)
-                            cache_dict = cache.cache
-                            for key, value in list(cache_dict.items()):
-                                try:
-                                    # Try to move converter models to CPU
-                                    converter = value  # In LRU cache, value might be wrapped
-                                    if hasattr(converter, 'doc_converter') and hasattr(converter.doc_converter, 'to'):
-                                        converter.doc_converter.to('cpu')
-                                    elif hasattr(converter, 'to'):
-                                        converter.to('cpu')
-                                except Exception:
-                                    pass
-                        except Exception:
-                            pass
+                    if hasattr(cache, 'cache'):
+                        cache_dict = cache.cache
+                        for key, converter in list(cache_dict.items()):
+                            try:
+                                # Deep traversal to find all PyTorch modules
+                                _move_to_cpu_recursive(converter)
+                            except Exception as e:
+                                _log.debug(f"Error moving converter to CPU: {e}")
         except Exception as e:
             _log.warning(f"Failed to move models to CPU: {e}")
 
-        # Step 2: Try to explicitly close ONNX Runtime sessions
+        # Step 2: Explicitly close ONNX Runtime sessions before clearing converters
+        onnx_sessions_found = 0
         try:
             if hasattr(orchestrator, 'cm') and hasattr(orchestrator.cm, '_get_converter_from_hash'):
                 cache = orchestrator.cm._get_converter_from_hash
                 if hasattr(cache, 'cache'):
-                    _log.info("Attempting to close ONNX Runtime sessions...")
+                    _log.info("Explicitly closing ONNX Runtime sessions...")
+
+                    # Deep search for ONNX sessions in converter objects
                     for key, converter in list(cache.cache.items()):
                         try:
-                            # Try to access and delete ONNX sessions within converters
-                            if hasattr(converter, '__dict__'):
-                                for attr_name in list(converter.__dict__.keys()):
-                                    attr = getattr(converter, attr_name, None)
-                                    # Look for ONNX InferenceSession objects
-                                    if attr is not None and 'onnxruntime' in str(type(attr)):
-                                        _log.info(f"Found ONNX session in {attr_name}, deleting...")
-                                        delattr(converter, attr_name)
+                            _close_onnx_sessions_recursive(converter)
                         except Exception as e:
-                            _log.debug(f"Error closing ONNX session: {e}")
+                            _log.debug(f"Error closing ONNX sessions in converter: {e}")
         except Exception as e:
-            _log.warning(f"Failed to close ONNX sessions: {e}")
+            _log.debug(f"ONNX session search: {e}")
 
-        # Step 3: Clear converters and explicitly delete cache entries
+        # Step 3: Clear converters through orchestrator API
         await orchestrator.clear_converters()
 
-        # Also try to manually clear the cache dictionary
+        # Step 4: Manually clear cache entries and delete converter objects
         try:
             if hasattr(orchestrator, 'cm') and hasattr(orchestrator.cm, '_get_converter_from_hash'):
                 cache = orchestrator.cm._get_converter_from_hash
                 if hasattr(cache, 'cache'):
                     _log.info(f"Manually clearing {len(cache.cache)} cached converters...")
-                    # Delete each converter explicitly
+
+                    # Explicitly delete each converter and its references
                     for key in list(cache.cache.keys()):
                         try:
+                            converter = cache.cache[key]
+                            # Delete all remaining attributes
+                            if hasattr(converter, '__dict__'):
+                                for attr_name in list(converter.__dict__.keys()):
+                                    try:
+                                        delattr(converter, attr_name)
+                                    except:
+                                        pass
+
+                            # Delete the converter reference
                             del cache.cache[key]
-                        except:
-                            pass
+                        except Exception as e:
+                            _log.debug(f"Error clearing cache entry: {e}")
+
                     cache.cache.clear()
         except Exception as e:
             _log.debug(f"Manual cache clear: {e}")
 
-        # Step 4: Force aggressive garbage collection
+        # Step 5: Force aggressive garbage collection (multiple passes)
         import gc
         _log.info("Running aggressive garbage collection...")
-        for _ in range(5):
-            gc.collect()
-        gc.collect(2)  # Full collection including generation 2
+        for i in range(3):
+            collected = gc.collect(generation=2)  # Full collection
+            _log.debug(f"GC pass {i+1}: collected {collected} objects")
 
-        # Step 5: Try to force ONNX Runtime CUDA cleanup
+        # Additional passes for good measure
+        for _ in range(2):
+            gc.collect()
+
+        # Step 6: Advanced PyTorch CUDA memory cleanup
+        try:
+            import torch
+            if torch.cuda.is_available():
+                _log.info("Performing advanced CUDA memory cleanup...")
+
+                # Get all CUDA devices
+                num_devices = torch.cuda.device_count()
+
+                for device_id in range(num_devices):
+                    device = torch.device(f'cuda:{device_id}')
+
+                    # Empty cache first
+                    torch.cuda.empty_cache()
+
+                    # Reset memory stats to clear internal tracking
+                    torch.cuda.reset_peak_memory_stats(device)
+                    torch.cuda.reset_accumulated_memory_stats(device)
+
+                    # Synchronize to ensure all operations complete
+                    torch.cuda.synchronize(device)
+
+                    # Try to release all unused cached memory
+                    # This is more aggressive than empty_cache()
+                    try:
+                        # Set memory fraction to 0.0 temporarily to force release
+                        torch.cuda.set_per_process_memory_fraction(0.0, device)
+                        torch.cuda.empty_cache()
+                        torch.cuda.synchronize(device)
+
+                        # Restore to full fraction
+                        torch.cuda.set_per_process_memory_fraction(1.0, device)
+                    except Exception as e:
+                        _log.debug(f"Memory fraction adjustment failed: {e}")
+
+                # Final cache clear across all devices
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+
+                _log.info("PyTorch CUDA memory cleanup complete")
+        except Exception as e:
+            _log.warning(f"Advanced CUDA cleanup failed: {e}")
+
+        # Step 7: ONNX Runtime specific cleanup
         try:
             import onnxruntime as ort
             providers = ort.get_available_providers()
             if 'CUDAExecutionProvider' in providers:
-                _log.info("ONNX Runtime CUDA provider detected, forcing cleanup...")
-                # Trick: Creating and immediately destroying a session sometimes triggers
-                # ONNX Runtime to release cached CUDA allocations
-                # This is a workaround since ONNX Runtime has no official cleanup API
+                _log.info("Performing ONNX Runtime CUDA cleanup...")
+
+                # ONNX Runtime maintains internal CUDA memory allocator
+                # We need to force it to release memory through aggressive GC
                 import gc
-                gc.collect()
-                gc.collect()
-        except Exception as e:
-            _log.debug(f"ONNX Runtime cleanup attempt: {e}")
 
-        # Step 6: Explicitly free CUDA memory
-        try:
-            import torch
-            if torch.cuda.is_available():
-                _log.info("Clearing CUDA cache...")
-                # Clear CUDA cache multiple times
-                torch.cuda.empty_cache()
-                torch.cuda.synchronize()
+                # Multiple GC passes specifically for ONNX cleanup
+                for i in range(5):
+                    gc.collect(2)
 
-                # Reset peak memory stats
-                torch.cuda.reset_peak_memory_stats()
-                torch.cuda.reset_accumulated_memory_stats()
-
-                # Try to set memory fraction to minimal (releases reserved memory)
+                # Try to force ONNX to release its CUDA allocator cache
+                # by importing and immediately destroying a minimal session
                 try:
-                    for device_id in range(torch.cuda.device_count()):
-                        torch.cuda.set_per_process_memory_fraction(0.0, device_id)
+                    import torch
+                    if torch.cuda.is_available():
+                        # Empty cache between GC passes
                         torch.cuda.empty_cache()
-                        torch.cuda.set_per_process_memory_fraction(1.0, device_id)
+                        torch.cuda.synchronize()
                 except Exception:
                     pass
 
-                # Final empty cache calls
+                _log.debug("ONNX Runtime cleanup complete")
+        except Exception as e:
+            _log.debug(f"ONNX Runtime cleanup: {e}")
+
+        # Step 8: Final verification and logging
+        try:
+            import torch
+            if torch.cuda.is_available():
+                # One more cache clear and sync
                 torch.cuda.empty_cache()
                 torch.cuda.synchronize()
 
                 mem_after = torch.cuda.memory_allocated() / 1024**2
                 mem_reserved = torch.cuda.memory_reserved() / 1024**2
+                mem_freed = mem_before - mem_after if 'mem_before' in locals() else 0
+
                 _log.info(f"VRAM allocated after cleanup: {mem_after:.2f} MB")
                 _log.info(f"VRAM reserved after cleanup: {mem_reserved:.2f} MB")
-                _log.info("CUDA cache cleared and synchronized")
 
-                # If still significant memory, log warning
-                if mem_after > 100:
-                    _log.warning(f"VRAM still has {mem_after:.2f} MB allocated - this may be CUDA context overhead")
+                if mem_freed > 0:
+                    _log.info(f"VRAM freed: {mem_freed:.2f} MB")
+
+                # Warn if significant memory still allocated
+                # CUDA context overhead is typically 200-500MB
+                if mem_after > 600:
+                    _log.warning(
+                        f"VRAM still has {mem_after:.2f} MB allocated. "
+                        f"This may indicate CUDA context overhead ({200}-{500}MB is normal) "
+                        f"or incomplete cleanup. Reserved: {mem_reserved:.2f} MB"
+                    )
+                elif mem_after > 100:
+                    _log.info(f"Remaining {mem_after:.2f} MB is likely CUDA context overhead")
         except Exception as e:
-            _log.warning(f"Failed to clear CUDA cache: {e}")
+            _log.warning(f"Failed to verify VRAM cleanup: {e}")
+
+
+def _close_onnx_sessions_recursive(obj, visited=None):
+    """Recursively find and close all ONNX Runtime InferenceSession objects."""
+    if visited is None:
+        visited = set()
+
+    # Avoid infinite recursion
+    obj_id = id(obj)
+    if obj_id in visited:
+        return
+    visited.add(obj_id)
+
+    try:
+        # Check if this is an ONNX InferenceSession
+        obj_type = str(type(obj))
+        if 'onnxruntime' in obj_type and 'InferenceSession' in obj_type:
+            # Try to explicitly end the session if method exists
+            if hasattr(obj, '__del__'):
+                try:
+                    obj.__del__()
+                except Exception:
+                    pass
+            _log.debug(f"Found and closed ONNX session: {obj_type}")
+            return
+
+        # Recursively process object attributes
+        if hasattr(obj, '__dict__'):
+            for attr_name in list(obj.__dict__.keys()):
+                try:
+                    attr = getattr(obj, attr_name, None)
+                    if attr is not None:
+                        _close_onnx_sessions_recursive(attr, visited)
+                except Exception:
+                    pass
+
+        # Process list/tuple elements
+        elif isinstance(obj, (list, tuple)):
+            for item in obj:
+                try:
+                    _close_onnx_sessions_recursive(item, visited)
+                except Exception:
+                    pass
+
+        # Process dict values
+        elif isinstance(obj, dict):
+            for value in obj.values():
+                try:
+                    _close_onnx_sessions_recursive(value, visited)
+                except Exception:
+                    pass
+
+    except Exception:
+        pass
+
+
+def _move_to_cpu_recursive(obj, visited=None):
+    """Recursively move all PyTorch tensors and modules to CPU."""
+    if visited is None:
+        visited = set()
+
+    # Avoid infinite recursion
+    obj_id = id(obj)
+    if obj_id in visited:
+        return
+    visited.add(obj_id)
+
+    try:
+        import torch
+
+        # Move PyTorch modules to CPU
+        if isinstance(obj, torch.nn.Module):
+            obj.to('cpu')
+            obj.eval()  # Set to eval mode to release training buffers
+
+        # Move tensors to CPU
+        elif isinstance(obj, torch.Tensor):
+            if obj.is_cuda:
+                obj.cpu()
+
+        # Recursively process object attributes
+        elif hasattr(obj, '__dict__'):
+            for attr_name in list(obj.__dict__.keys()):
+                try:
+                    attr = getattr(obj, attr_name, None)
+                    if attr is not None:
+                        _move_to_cpu_recursive(attr, visited)
+                except Exception:
+                    pass
+
+        # Process list/tuple elements
+        elif isinstance(obj, (list, tuple)):
+            for item in obj:
+                _move_to_cpu_recursive(item, visited)
+
+        # Process dict values
+        elif isinstance(obj, dict):
+            for value in obj.values():
+                _move_to_cpu_recursive(value, visited)
+
+    except Exception:
+        pass
 
 
 async def cleanup_models_after_task(orchestrator: BaseOrchestrator, task_id: str):
     """
     Cleanup models after a task completes (for synchronous endpoints).
     Only clears models if there are no other active tasks running.
+
+    If DOCLING_SERVE_MAX_TASKS_BEFORE_RESTART is set, will automatically
+    trigger a graceful server restart after N tasks to ensure complete VRAM cleanup.
     """
+    global _task_counter
+
     if not docling_serve_settings.free_vram_on_idle:
         return
+
+    # Increment task counter
+    _task_counter += 1
+
+    # Log task counter status
+    if _max_tasks_before_restart > 0:
+        _log.info(f"Task completed: {_task_counter}/{_max_tasks_before_restart} tasks before auto-restart")
+
+        # Check if we should restart
+        if _task_counter >= _max_tasks_before_restart:
+            _log.warning(
+                f"Reached maximum tasks ({_max_tasks_before_restart}). "
+                f"Initiating graceful shutdown for VRAM cleanup..."
+            )
+            _log.warning(
+                "Container will restart automatically if restart policy is configured. "
+                "This ensures complete VRAM release due to ONNX Runtime CUDA allocator limitations."
+            )
+
+            # Give time for current response to be sent and any pending operations
+            await asyncio.sleep(2.0)
+
+            # Trigger graceful shutdown
+            # The container restart policy will restart the server
+            _log.info("Sending SIGTERM for graceful shutdown...")
+            os.kill(os.getpid(), signal.SIGTERM)
+            return
 
     # Check if there are other active tasks before cleaning up
     has_active_tasks = False

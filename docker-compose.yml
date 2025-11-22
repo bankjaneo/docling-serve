@@ -58,11 +58,24 @@ services:
       DOCLING_SERVE_FREE_VRAM_ON_IDLE: "False"
       DOCLING_SERVE_CLEANUP_POLL_INTERVAL: 5.0
 
+      # Auto-Restart for VRAM Cleanup
+      # Automatically restart container after N tasks to ensure complete VRAM cleanup.
+      # Required for ONNX Runtime CUDA memory release (does not release memory in-process).
+      # Set to 0 to disable auto-restart.
+      # Recommended values:
+      #   1-5:   Maximum VRAM efficiency (best for large documents or limited VRAM)
+      #   20-50: Balanced approach (recommended for most use cases)
+      #   100+:  Minimal restart overhead (for systems with abundant VRAM)
+      # Note: Requires 'restart: unless-stopped' policy (configured below)
+      # DOCLING_SERVE_MAX_TASKS_BEFORE_RESTART: 50
+
       # External Model Unloading (Ollama)
+      # Unload Ollama models before loading Docling models (useful for VRAM sharing)
       # DOCLING_SERVE_UNLOAD_OLLAMA_BASE_URL: http://ollama:11434
       # DOCLING_SERVE_UNLOAD_OLLAMA_MODEL: llama3.2-vision
 
       # External Model Unloading (llama-swap)
+      # Unload llama-swap models before loading Docling models (useful for VRAM sharing)
       # DOCLING_SERVE_UNLOAD_LLAMA_SWAP_BASE_URL: http://llama-swap:8080
 
       DOCLING_SERVE_UNLOAD_EXTERNAL_MODEL_TIMEOUT: 10.0

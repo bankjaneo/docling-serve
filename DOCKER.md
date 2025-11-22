@@ -238,20 +238,44 @@ cat /etc/docker/daemon.json
 
 ### Out of Memory Errors
 
-Enable VRAM cleanup on idle:
+Enable VRAM cleanup on idle with auto-restart:
 
 ```yaml
 environment:
   DOCLING_SERVE_FREE_VRAM_ON_IDLE: "True"
+  DOCLING_SERVE_MAX_TASKS_BEFORE_RESTART: 50  # Restart after N tasks for complete VRAM cleanup
 ```
 
-Or integrate with Ollama for model swapping:
+**Why auto-restart?** ONNX Runtime's CUDA allocator caches memory and doesn't release it back to the OS in-process. Restarting the container after N tasks ensures complete VRAM cleanup. The value depends on your workload:
+- `1-5`: Maximum VRAM efficiency, best for large documents or limited VRAM
+- `20-50`: Balanced approach (recommended for most cases)
+- `100+`: Minimal restart overhead, for systems with abundant VRAM
+
+Or integrate with Ollama/llama-swap for model swapping:
 
 ```yaml
 environment:
   DOCLING_SERVE_UNLOAD_OLLAMA_BASE_URL: http://ollama:11434
   DOCLING_SERVE_UNLOAD_OLLAMA_MODEL: llama3.2-vision
+  # Or for llama-swap:
+  DOCLING_SERVE_UNLOAD_LLAMA_SWAP_BASE_URL: http://llama-swap:9292/v1
 ```
+
+**Complete VRAM management example:**
+
+```yaml
+environment:
+  # Enable VRAM cleanup
+  DOCLING_SERVE_FREE_VRAM_ON_IDLE: "True"
+
+  # Auto-restart for complete cleanup (required for ONNX Runtime memory release)
+  DOCLING_SERVE_MAX_TASKS_BEFORE_RESTART: 50
+
+  # Unload external models before loading Docling models
+  DOCLING_SERVE_UNLOAD_LLAMA_SWAP_BASE_URL: http://172.17.0.1:9292/v1
+```
+
+**Note:** The `restart: unless-stopped` policy in docker-compose.yml is required for auto-restart to work.
 
 ### Model Download Timeouts
 
