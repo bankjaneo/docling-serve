@@ -146,7 +146,7 @@ def _worker_process_entry(
             results = []
             for source in task_data.sources:
                 # Handle different source types
-                if hasattr(source, 'path') and hasattr(source, 'kind'):
+                if hasattr(source, 'kind') and source.kind == 'file':
                     # This is a FileSourceRequest object, extract the path
                     if hasattr(source, 'base64_data') and source.base64_data:
                         # For base64 data, we need to decode and write to temp file
@@ -164,9 +164,13 @@ def _worker_process_entry(
                     else:
                         # For path-based sources, use the path directly
                         conv_result = converter.convert(source.path)
-                else:
-                    # Assume source is already a path or string
+                elif isinstance(source, (str, Path)):
+                    # Handle string or Path objects directly
                     conv_result = converter.convert(source)
+                else:
+                    # Try to convert source to string or raise informative error
+                    _log.error(f"Unsupported source type: {type(source)} - {source}")
+                    raise ValueError(f"Unsupported source type: {type(source)}. Expected str, Path, or FileSourceRequest.")
                 results.append(conv_result)
             result = results
 
@@ -175,7 +179,7 @@ def _worker_process_entry(
             results = []
             for source in task_data.sources:
                 # Handle different source types
-                if hasattr(source, 'path') and hasattr(source, 'kind'):
+                if hasattr(source, 'kind') and source.kind == 'file':
                     # This is a FileSourceRequest object, extract the path
                     if hasattr(source, 'base64_data') and source.base64_data:
                         # For base64 data, we need to decode and write to temp file
@@ -193,9 +197,13 @@ def _worker_process_entry(
                     else:
                         # For path-based sources, use the path directly
                         conv_result = converter.convert(source.path)
-                else:
-                    # Assume source is already a path or string
+                elif isinstance(source, (str, Path)):
+                    # Handle string or Path objects directly
                     conv_result = converter.convert(source)
+                else:
+                    # Try to convert source to string or raise informative error
+                    _log.error(f"Unsupported source type: {type(source)} - {source}")
+                    raise ValueError(f"Unsupported source type: {type(source)}. Expected str, Path, or FileSourceRequest.")
                 results.append(conv_result)
             result = results
         else:
