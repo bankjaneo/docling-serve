@@ -313,10 +313,29 @@ async def ensure_models_loaded(orchestrator: BaseOrchestrator):
                 _log.warning(f"Large VRAM increase detected: {increase:.2f} MB")
 
 
-async def cleanup_models_if_needed(orchestrator: BaseOrchestrator):
+async def cleanup_models_if_needed(orchestrator: BaseOrchestrator, deep_cleanup: bool = False):
     """Clear models after processing if lazy loading is enabled to free VRAM."""
     if docling_serve_settings.free_vram_on_idle:
         _log.info("Clearing models to free VRAM...")
+
+        # Check if models are actually loaded before starting cleanup
+        model_status = "unknown"
+        try:
+            if hasattr(orchestrator, 'cm') and hasattr(orchestrator.cm, '_get_converter_from_hash'):
+                cache = orchestrator.cm._get_converter_from_hash
+                if hasattr(cache, 'cache_info'):
+                    cache_info = cache.cache_info()
+                    model_status = f"cache_hits: {cache_info.hits}, misses: {cache_info.misses}, size: {cache_info.currsize}"
+                elif hasattr(cache, 'cache'):
+                    model_status = f"cached converters: {len(cache.cache)}"
+                else:
+                    model_status = "cache structure unknown"
+            else:
+                model_status = "no converter manager found"
+        except Exception as e:
+            model_status = f"status check failed: {e}"
+
+        _log.info(f"Model status before cleanup: {model_status}")
 
         # Track VRAM usage before cleanup and detect trends
         mem_before, mem_reserved_before = track_vram_usage("cleanup_start")
@@ -326,6 +345,24 @@ async def cleanup_models_if_needed(orchestrator: BaseOrchestrator):
 
         # Log trend analysis
         log_vram_trend_analysis()
+
+        # Skip cleanup if minimal VRAM is allocated
+        if mem_before is not None and mem_before < 50:
+            _log.info(f"Skipping cleanup - minimal VRAM allocated ({mem_before:.2f} MB)")
+            return
+
+        # Check if we need deep cleanup based on recent history
+        if not deep_cleanup and len(_vram_usage_history) >= 2:
+            recent_cleanups = [h for h in _vram_usage_history[-5:] if h['context'] == 'cleanup_end']
+            if len(recent_cleanups) >= 2:
+                # Check if VRAM has been increasing
+                allocations = [h['allocated'] for h in recent_cleanups]
+                if len(allocations) >= 2 and allocations[-1] > allocations[0]:
+                    _log.warning("VRAM accumulation detected, triggering deep cleanup mode")
+                    deep_cleanup = True
+
+        cleanup_mode = "deep" if deep_cleanup else "standard"
+        _log.info(f"Starting {cleanup_mode} cleanup mode...")
 
         # Step 1: Move models to CPU and force release references
         try:
@@ -460,7 +497,8 @@ async def cleanup_models_if_needed(orchestrator: BaseOrchestrator):
                 _log.info(f"Found {device_count} CUDA device(s)")
 
                 # Step 7a: Force empty cache and synchronize multiple times
-                for i in range(3):
+                cache_iterations = 5 if deep_cleanup else 3
+                for i in range(cache_iterations):
                     torch.cuda.empty_cache()
                     torch.cuda.synchronize()
                     _log.debug(f"CUDA cleanup iteration {i+1} completed")
@@ -481,17 +519,26 @@ async def cleanup_models_if_needed(orchestrator: BaseOrchestrator):
                         _log.debug(f"Device {device_id} - Allocated: {mem_alloc/1024**2:.2f}MB, Reserved: {mem_reserv/1024**2:.2f}MB")
 
                         # Aggressive memory fraction manipulation
-                        torch.cuda.set_per_process_memory_fraction(0.1, device_id)
-                        torch.cuda.empty_cache()
-                        torch.cuda.synchronize()
+                        if deep_cleanup:
+                            # More aggressive sequence for deep cleanup
+                            for fraction in [0.05, 0.01, 0.0, 0.1, 1.0]:
+                                torch.cuda.set_per_process_memory_fraction(fraction, device_id)
+                                torch.cuda.empty_cache()
+                                torch.cuda.synchronize()
+                                await asyncio.sleep(0.01)  # Brief pause for deep cleanup
+                        else:
+                            # Standard sequence
+                            torch.cuda.set_per_process_memory_fraction(0.1, device_id)
+                            torch.cuda.empty_cache()
+                            torch.cuda.synchronize()
 
-                        torch.cuda.set_per_process_memory_fraction(0.0, device_id)
-                        torch.cuda.empty_cache()
-                        torch.cuda.synchronize()
+                            torch.cuda.set_per_process_memory_fraction(0.0, device_id)
+                            torch.cuda.empty_cache()
+                            torch.cuda.synchronize()
 
-                        torch.cuda.set_per_process_memory_fraction(1.0, device_id)
-                        torch.cuda.empty_cache()
-                        torch.cuda.synchronize()
+                            torch.cuda.set_per_process_memory_fraction(1.0, device_id)
+                            torch.cuda.empty_cache()
+                            torch.cuda.synchronize()
 
                         # Restore original device
                         torch.cuda.set_device(current_device)
@@ -502,7 +549,7 @@ async def cleanup_models_if_needed(orchestrator: BaseOrchestrator):
 
                 # Step 7d: Final cleanup pass with extra garbage collection
                 gc.collect()
-                for _ in range(2):
+                for _ in range(3 if deep_cleanup else 2):
                     torch.cuda.empty_cache()
                     torch.cuda.synchronize()
 
@@ -515,21 +562,51 @@ async def cleanup_models_if_needed(orchestrator: BaseOrchestrator):
                     for device_id in range(device_count):
                         try:
                             with torch.cuda.device(device_id):
-                                # Create and immediately delete dummy tensor to force context cleanup
-                                dummy = torch.tensor([1.0], device=f'cuda:{device_id}')
-                                del dummy
-                                torch.cuda.empty_cache()
+                                if deep_cleanup:
+                                    # More aggressive context cleanup
+                                    for size in [1, 10, 100]:
+                                        dummy = torch.randn(size, size, device=f'cuda:{device_id}')
+                                        del dummy
+                                        torch.cuda.empty_cache()
+                                        torch.cuda.synchronize()
+                                else:
+                                    # Standard approach
+                                    dummy = torch.tensor([1.0], device=f'cuda:{device_id}')
+                                    del dummy
+                                    torch.cuda.empty_cache()
                         except Exception as e:
                             _log.debug(f"Context cleanup failed for device {device_id}: {e}")
                 except Exception as e:
                     _log.debug(f"CUDA context cleanup failed: {e}")
 
-                # Step 7f: Final memory report
+                # Step 7f: Deep cleanup specific techniques
+                if deep_cleanup:
+                    try:
+                        _log.info("Applying deep cleanup techniques...")
+
+                        # Force reset all CUDA devices (aggressive)
+                        for device_id in range(device_count):
+                            try:
+                                torch.cuda.set_device(device_id)
+                                torch.cuda.reset_device()
+                                torch.cuda.empty_cache()
+                                torch.cuda.synchronize()
+                            except Exception as e:
+                                _log.debug(f"Device reset failed for {device_id}: {e}")
+
+                        # Restore original device
+                        if device_count > 0:
+                            torch.cuda.set_device(current_device)
+
+                    except Exception as e:
+                        _log.debug(f"Deep cleanup device reset failed: {e}")
+
+                # Step 7g: Final memory report
                 mem_after = torch.cuda.memory_allocated() / 1024**2
                 mem_reserved = torch.cuda.memory_reserved() / 1024**2
                 _log.info(f"VRAM allocated after cleanup: {mem_after:.2f} MB")
                 _log.info(f"VRAM reserved after cleanup: {mem_reserved:.2f} MB")
-                _log.info("Enhanced CUDA cleanup completed")
+                _log.info(f"{cleanup_mode.title()} CUDA cleanup completed")
 
                 # Track final VRAM usage
                 track_vram_usage("cleanup_end")
@@ -545,6 +622,8 @@ async def cleanup_models_if_needed(orchestrator: BaseOrchestrator):
                 # If still significant memory, log detailed warning with troubleshooting tips
                 if mem_after > 100:
                     _log.warning(f"VRAM still has {mem_after:.2f} MB allocated - this may be persistent CUDA context overhead")
+                    if deep_cleanup:
+                        _log.warning("Deep cleanup was unable to free additional VRAM - this may indicate persistent CUDA context or external allocations")
                     _log.info("Tip: This residual memory is often CUDA context overhead and cannot be fully cleared without process restart")
                     _log.info("Tip: Consider reducing model size or batch size if this becomes problematic")
 
@@ -552,8 +631,36 @@ async def cleanup_models_if_needed(orchestrator: BaseOrchestrator):
                 torch.cuda.empty_cache()
                 gc.collect()
 
+                # Wait a moment to let cleanup settle
+                await asyncio.sleep(0.2 if deep_cleanup else 0.1)
+
+                # Check VRAM again after a short delay
+                mem_delayed = torch.cuda.memory_allocated() / 1024**2
+                if mem_delayed != mem_after:
+                    _log.info(f"VRAM changed after delay: {mem_after:.2f}MB → {mem_delayed:.2f}MB")
+                    # Track the delayed measurement
+                    track_vram_usage("cleanup_delayed")
+
         except Exception as e:
             _log.warning(f"Failed to clear CUDA cache: {e}")
+
+        # Final model status check
+        try:
+            model_status_after = "unknown"
+            if hasattr(orchestrator, 'cm') and hasattr(orchestrator.cm, '_get_converter_from_hash'):
+                cache = orchestrator.cm._get_converter_from_hash
+                if hasattr(cache, 'cache_info'):
+                    cache_info = cache.cache_info()
+                    model_status_after = f"cache_hits: {cache_info.hits}, misses: {cache_info.misses}, size: {cache_info.currsize}"
+                elif hasattr(cache, 'cache'):
+                    model_status_after = f"cached converters: {len(cache.cache)}"
+                else:
+                    model_status_after = "cache structure unknown"
+            else:
+                model_status_after = "no converter manager found"
+            _log.info(f"Model status after cleanup: {model_status_after}")
+        except Exception as e:
+            _log.debug(f"Post-cleanup status check failed: {e}")
 
 
 async def cleanup_models_after_task(orchestrator: BaseOrchestrator, task_id: str):
@@ -1531,6 +1638,30 @@ def create_app():  # noqa: C901
         older_then: float = 3600,
     ):
         await orchestrator.clear_results(older_than=older_then)
+        return ClearResponse()
+
+    # Deep VRAM cleanup
+    @app.get(
+        "/v1/clear/vram",
+        tags=["clear"],
+        response_model=ClearResponse,
+    )
+    async def deep_vram_cleanup(
+        auth: Annotated[AuthenticationResult, Depends(require_auth)],
+        orchestrator: Annotated[BaseOrchestrator, Depends(get_async_orchestrator)],
+    ):
+        """
+        Perform a deep VRAM cleanup. This endpoint can be used to manually trigger
+        aggressive VRAM cleanup when standard cleanup is not effective.
+        """
+        if not docling_serve_settings.free_vram_on_idle:
+            raise HTTPException(
+                status_code=400,
+                detail="Deep VRAM cleanup requires DOCLING_SERVE_FREE_VRAM_ON_IDLE=True"
+            )
+
+        _log.info("Manual deep VRAM cleanup requested via API")
+        await cleanup_models_if_needed(orchestrator, deep_cleanup=True)
         return ClearResponse()
 
     return app
