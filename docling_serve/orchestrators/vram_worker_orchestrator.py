@@ -103,13 +103,17 @@ def _worker_process_entry(
         cm = DoclingConverterManager(config=cm_config)
 
         # Get a converter instance from the manager
-        # Create a minimal PDF format option object with the required model_dump() method
+        # Create a minimal PDF format option object with all required attributes
         class MinimalPdfFormatOption:
             def __init__(self, backend=PdfBackend.DLPARSE_V4):
                 self.backend = backend
+                self.pipeline_options = None  # Initialize as None since it's checked in the hash function
 
             def model_dump(self, serialize_as_any=True):
-                return {"backend": self.backend.value}
+                return {
+                    "backend": self.backend.value,
+                    "pipeline_options": self.pipeline_options
+                }
 
         # Extract pdf_backend from convert_options if available, otherwise default to DLPARSE_V4
         pdf_backend = PdfBackend.DLPARSE_V4
