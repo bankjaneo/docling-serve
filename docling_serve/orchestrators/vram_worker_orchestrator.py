@@ -404,8 +404,10 @@ class VRAMWorkerOrchestrator(BaseOrchestrator):
         task_id = worker_task.task_id
 
         try:
-            # Create result queue for inter-process communication
-            result_queue: Queue = Queue()
+            # Use 'spawn' start method to ensure clean process (no CUDA inheritance)
+            # IMPORTANT: Create Queue using the same context to avoid SemLock errors
+            ctx = multiprocessing.get_context("spawn")
+            result_queue = ctx.Queue()
             self.result_queues[task_id] = result_queue
 
             # Update task status to STARTED
@@ -414,8 +416,6 @@ class VRAMWorkerOrchestrator(BaseOrchestrator):
             await self._safe_notify(task_id)
 
             # Spawn worker process
-            # Use 'spawn' start method to ensure clean process (no CUDA inheritance)
-            ctx = multiprocessing.get_context("spawn")
             process = ctx.Process(
                 target=_worker_process_entry,
                 args=(worker_task, result_queue, self.converter_manager_config),
