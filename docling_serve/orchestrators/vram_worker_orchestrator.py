@@ -108,36 +108,18 @@ def _worker_process_entry(
         cm = DoclingConverterManager(config=cm_config)
 
         # Get a converter instance from the manager
-        # Create a minimal PDF format option object with all required attributes
-        class MinimalPdfFormatOption:
-            def __init__(self, backend=PdfBackend.DLPARSE_V4):
-                # Add __name__ attribute to the backend since docling expects it
-                if not hasattr(backend, '__name__'):
-                    backend.__name__ = backend.name.lower()
-                self.backend = backend
-                self.pipeline_options = None
-                self.pipeline_cls = None  # Required by the hash function
-                self.backend_options = None  # Required by DocumentConverter
-                self.model_fields_set = set()  # Required by docling for pydantic compatibility
+        # Try to get converter without pdf_format_option first
+        try:
+            converter = cm.get_converter()
+        except TypeError as e:
+            _log.error(f"Failed to get converter without pdf_format_option: {e}")
 
-            def model_dump(self, serialize_as_any=True):
-                return {
-                    "backend": self.backend.value,  # Pass the enum value (string) instead of the enum object
-                    "pipeline_options": self.pipeline_options,
-                    "pipeline_cls": self.pipeline_cls,
-                    "backend_options": self.backend_options
-                }
-
-        # Extract pdf_backend from convert_options if available, otherwise default to DLPARSE_V4
-        pdf_backend = PdfBackend.DLPARSE_V4
-        if task_data.convert_options and 'pdf_backend' in task_data.convert_options:
-            pdf_backend_str = task_data.convert_options['pdf_backend']
-            # Convert string to PdfBackend enum
-            if hasattr(PdfBackend, pdf_backend_str.upper()):
-                pdf_backend = PdfBackend[pdf_backend_str.upper()]
-
-        pdf_format_option = MinimalPdfFormatOption(backend=pdf_backend)
-        converter = cm.get_converter(pdf_format_option=pdf_format_option)
+            # If that fails, try with None
+            try:
+                converter = cm.get_converter(pdf_format_option=None)
+            except TypeError as e2:
+                _log.error(f"Failed to get converter with pdf_format_option=None: {e2}")
+                raise ValueError(f"Unable to get converter: {e2}")
 
         # Perform conversion
         task_type_str = task_data.task_type.upper() if isinstance(task_data.task_type, str) else task_data.task_type
