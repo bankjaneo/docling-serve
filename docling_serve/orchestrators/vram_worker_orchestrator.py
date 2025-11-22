@@ -118,6 +118,7 @@ def _worker_process_entry(
                 self.pipeline_options = None
                 self.pipeline_cls = None  # Required by the hash function
                 self.backend_options = None  # Required by DocumentConverter
+                self.model_fields_set = set()  # Required by docling for pydantic compatibility
 
             def model_dump(self, serialize_as_any=True):
                 return {
