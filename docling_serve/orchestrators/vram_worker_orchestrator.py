@@ -147,9 +147,12 @@ def _worker_process_entry(
             for source in task_data.sources:
                 # Handle different source types
                 if hasattr(source, 'kind') and source.kind == 'file':
-                    # This is a FileSourceRequest object, extract the path
+                    # This is a FileSourceRequest object, check its structure
+                    _log.info(f"FileSourceRequest attributes: {dir(source)}")
+
                     if hasattr(source, 'base64_data') and source.base64_data:
                         # For base64 data, we need to decode and write to temp file
+                        _log.info("Processing base64 data")
                         # Decode base64 and write to temporary file
                         file_data = base64.b64decode(source.base64_data)
                         with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as temp_file:
@@ -162,8 +165,20 @@ def _worker_process_entry(
                             # Clean up temp file
                             os.unlink(temp_path)
                     else:
-                        # For path-based sources, use the path directly
-                        conv_result = converter.convert(source.path)
+                        # Check what attributes this FileSource has
+                        if hasattr(source, 'name'):
+                            _log.info(f"Using source.name: {source.name}")
+                            conv_result = converter.convert(source.name)
+                        elif hasattr(source, 'filename'):
+                            _log.info(f"Using source.filename: {source.filename}")
+                            conv_result = converter.convert(source.filename)
+                        elif hasattr(source, 'url'):
+                            _log.info(f"Using source.url: {source.url}")
+                            conv_result = converter.convert(source.url)
+                        else:
+                            # Log all available attributes for debugging
+                            _log.error(f"Unknown FileSourceRequest structure. Available attributes: {[attr for attr in dir(source) if not attr.startswith('_')]}")
+                            raise ValueError(f"Cannot extract file path from FileSourceRequest")
                 elif isinstance(source, (str, Path)):
                     # Handle string or Path objects directly
                     conv_result = converter.convert(source)
@@ -180,9 +195,12 @@ def _worker_process_entry(
             for source in task_data.sources:
                 # Handle different source types
                 if hasattr(source, 'kind') and source.kind == 'file':
-                    # This is a FileSourceRequest object, extract the path
+                    # This is a FileSourceRequest object, check its structure
+                    _log.info(f"FileSourceRequest attributes: {dir(source)}")
+
                     if hasattr(source, 'base64_data') and source.base64_data:
                         # For base64 data, we need to decode and write to temp file
+                        _log.info("Processing base64 data")
                         # Decode base64 and write to temporary file
                         file_data = base64.b64decode(source.base64_data)
                         with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as temp_file:
@@ -195,8 +213,20 @@ def _worker_process_entry(
                             # Clean up temp file
                             os.unlink(temp_path)
                     else:
-                        # For path-based sources, use the path directly
-                        conv_result = converter.convert(source.path)
+                        # Check what attributes this FileSource has
+                        if hasattr(source, 'name'):
+                            _log.info(f"Using source.name: {source.name}")
+                            conv_result = converter.convert(source.name)
+                        elif hasattr(source, 'filename'):
+                            _log.info(f"Using source.filename: {source.filename}")
+                            conv_result = converter.convert(source.filename)
+                        elif hasattr(source, 'url'):
+                            _log.info(f"Using source.url: {source.url}")
+                            conv_result = converter.convert(source.url)
+                        else:
+                            # Log all available attributes for debugging
+                            _log.error(f"Unknown FileSourceRequest structure. Available attributes: {[attr for attr in dir(source) if not attr.startswith('_')]}")
+                            raise ValueError(f"Cannot extract file path from FileSourceRequest")
                 elif isinstance(source, (str, Path)):
                     # Handle string or Path objects directly
                     conv_result = converter.convert(source)
