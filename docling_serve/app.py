@@ -143,7 +143,7 @@ def track_vram_usage(context: str = "cleanup"):
 
             # Detect accumulation trend
             if len(_vram_usage_history) >= 3:
-                recent_cleanup = [h for h in _vram_usage_history[-3:] if h['context'] == 'cleanup']
+                recent_cleanup = [h for h in _vram_usage_history[-3:] if h['context'] == 'cleanup_end']
                 if len(recent_cleanup) >= 2:
                     # Check if allocated memory is trending upward during cleanups
                     allocations = [h['allocated'] for h in recent_cleanup]
@@ -162,7 +162,7 @@ def log_vram_trend_analysis():
     if len(_vram_usage_history) < 2:
         return
 
-    cleanup_entries = [h for h in _vram_usage_history if h['context'] == 'cleanup']
+    cleanup_entries = [h for h in _vram_usage_history if h['context'] == 'cleanup_end']
     if len(cleanup_entries) < 2:
         return
 
@@ -400,7 +400,7 @@ async def cleanup_models_if_needed(orchestrator: BaseOrchestrator):
                     for key, converter in converters_to_delete:
                         try:
                             del converter
-                        except:
+                        except Exception:
                             pass
                     converters_to_delete.clear()
         except Exception as e:
@@ -419,7 +419,7 @@ async def cleanup_models_if_needed(orchestrator: BaseOrchestrator):
                     for key in list(cache.cache.keys()):
                         try:
                             del cache.cache[key]
-                        except:
+                        except Exception:
                             pass
                     cache.cache.clear()
         except Exception as e:
@@ -444,7 +444,7 @@ async def cleanup_models_if_needed(orchestrator: BaseOrchestrator):
                     try:
                         torch.cuda.empty_cache()
                         torch.cuda.synchronize()
-                    except:
+                    except Exception:
                         pass
         except Exception as e:
             _log.debug(f"ONNX Runtime cleanup attempt: {e}")

@@ -8,6 +8,7 @@ the effectiveness of the enhanced VRAM cleanup implementation.
 
 import asyncio
 import logging
+import os
 import sys
 import time
 
@@ -36,7 +37,7 @@ except ImportError:
 
 
 # Import the tracking functions from our implementation
-sys.path.insert(0, '/private/var/folders/fm/6lcsfk190z15dwlj5ws0849r0000gn/T/vibe-kanban/worktrees/29ff-improve-doclings/docling_serve')
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'docling_serve'))
 from app import track_vram_usage, log_vram_trend_analysis, _vram_usage_history
 
 
