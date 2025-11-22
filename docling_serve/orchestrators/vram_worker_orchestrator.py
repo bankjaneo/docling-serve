@@ -90,6 +90,7 @@ def _worker_process_entry(
     try:
         # Import heavy dependencies inside worker process
         # This ensures main process doesn't load CUDA
+        from docling.datamodel.pipeline_options import PdfBackend
         from docling_jobkit.convert.manager import (
             DoclingConverterManager,
             DoclingConverterManagerConfig,
@@ -102,10 +103,13 @@ def _worker_process_entry(
         cm = DoclingConverterManager(config=cm_config)
 
         # Get a converter instance from the manager
-        # Extract pdf_format_option from convert_options if available, otherwise None
-        pdf_format_option = None
-        if task_data.convert_options and 'pdf_format' in task_data.convert_options:
-            pdf_format_option = task_data.convert_options['pdf_format']
+        # Extract pdf_format_option from convert_options if available, otherwise default to PdfBackend.DLOCR
+        pdf_format_option = PdfBackend.DLOCR  # Default to DLOCR
+        if task_data.convert_options and 'pdf_backend' in task_data.convert_options:
+            pdf_backend_str = task_data.convert_options['pdf_backend']
+            # Convert string to PdfBackend enum
+            if hasattr(PdfBackend, pdf_backend_str.upper()):
+                pdf_format_option = PdfBackend[pdf_backend_str.upper()]
 
         converter = cm.get_converter(pdf_format_option=pdf_format_option)
 
