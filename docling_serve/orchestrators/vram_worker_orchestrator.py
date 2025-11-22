@@ -96,7 +96,6 @@ def _worker_process_entry(
         from pathlib import Path
 
         from docling.datamodel.pipeline_options import PdfBackend
-        from docling.datamodel.base_models import FormatOptions
         from docling_jobkit.convert.manager import (
             DoclingConverterManager,
             DoclingConverterManagerConfig,
@@ -109,19 +108,32 @@ def _worker_process_entry(
         cm = DoclingConverterManager(config=cm_config)
 
         # Get a converter instance from the manager
-        # Create a proper PDF format option using docling's FormatOptions
+        # Create a simple PDF format option with minimal required attributes
+        class SimplePdfFormatOption:
+            def __init__(self, backend=PdfBackend.DLPARSE_V4):
+                self.backend = backend
+                self.pipeline_options = None
+                self.pipeline_cls = None
+                self.backend_options = None
+                self.model_fields_set = set()
+
+            def model_dump(self, serialize_as_any=True):
+                # Return the backend name as string
+                return {
+                    "backend": self.backend.name.lower(),
+                    "pipeline_options": self.pipeline_options,
+                    "pipeline_cls": self.pipeline_cls,
+                    "backend_options": self.backend_options
+                }
+
+        # Extract pdf_backend from convert_options if available
         pdf_backend = PdfBackend.DLPARSE_V4
         if task_data.convert_options and 'pdf_backend' in task_data.convert_options:
             pdf_backend_str = task_data.convert_options['pdf_backend']
-            # Convert string to PdfBackend enum
             if hasattr(PdfBackend, pdf_backend_str.upper()):
                 pdf_backend = PdfBackend[pdf_backend_str.upper()]
 
-        # Create FormatOptions with the backend - this should have all required attributes
-        pdf_format_option = FormatOptions(
-            pdf_backend=pdf_backend
-        )
-
+        pdf_format_option = SimplePdfFormatOption(backend=pdf_backend)
         converter = cm.get_converter(pdf_format_option=pdf_format_option)
 
         # Perform conversion
