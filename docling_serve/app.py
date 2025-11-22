@@ -184,15 +184,20 @@ async def unload_external_models():
 
 async def _unload_llama_swap(base_url: str):
     """Unload models from llama-swap by calling the /unload endpoint."""
+    _log.warning(f"DEBUG: Received base_url: {base_url}, type: {type(base_url)}")
+
     # Handle case where base_url comes in as bytes from environment variable
     if isinstance(base_url, bytes):
+        _log.warning(f"DEBUG: Decoding bytes to string")
         base_url = base_url.decode("utf-8")
+        _log.warning(f"DEBUG: After decoding: {base_url}")
 
     # Parse URL to extract only scheme and netloc, stripping any path components
     # This handles cases where users include /v1 or other paths in the base URL
     parsed = httpx.URL(base_url)
     clean_base_url = f"{parsed.scheme}://{parsed.netloc}"
     url = f"{clean_base_url}/unload"
+    _log.warning(f"DEBUG: Final URL: {url}")
 
     try:
         async with httpx.AsyncClient(
