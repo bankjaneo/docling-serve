@@ -2,7 +2,10 @@ import asyncio
 import copy
 import importlib.metadata
 import logging
+import multiprocessing
+import os
 import shutil
+import signal
 import time
 from contextlib import asynccontextmanager
 from io import BytesIO
@@ -127,6 +130,18 @@ async def lifespan(app: FastAPI):
     notifier = WebsocketNotifier(orchestrator)
     orchestrator.bind_notifier(notifier)
 
+    # Initialize OCR process manager if enabled
+    ocr_manager = None
+    if getattr(docling_serve_settings, 'use_ocr_worker_processes', False):
+        _log.info("Initializing OCR worker processes for complete memory isolation")
+        try:
+            ocr_manager = get_ocr_process_manager()
+            ocr_manager.start_workers()
+            _log.info(f"OCR worker processes started successfully")
+        except Exception as e:
+            _log.error(f"Failed to initialize OCR worker processes: {e}")
+            _log.warning("Falling back to in-process OCR processing")
+
     # Warm up processing cache
     if docling_serve_settings.load_models_at_boot and not docling_serve_settings.free_vram_on_idle:
         await orchestrator.warm_up_caches()
@@ -142,6 +157,14 @@ async def lifespan(app: FastAPI):
         await queue_task
     except asyncio.CancelledError:
         _log.info("Queue processor cancelled.")
+
+    # Shutdown OCR worker processes if they were initialized
+    if ocr_manager:
+        try:
+            ocr_manager.shutdown()
+            _log.info("OCR worker processes shutdown complete")
+        except Exception as e:
+            _log.error(f"Error shutting down OCR worker processes: {e}")
 
     # Remove scratch directory in case it was a tempfile
     if docling_serve_settings.scratch_path is not None:
@@ -251,7 +274,9 @@ async def cleanup_models_if_needed(orchestrator: BaseOrchestrator):
             import torch
             if torch.cuda.is_available():
                 mem_before = torch.cuda.memory_allocated() / 1024**2
+                mem_reserved_before = torch.cuda.memory_reserved() / 1024**2
                 _log.info(f"VRAM allocated before cleanup: {mem_before:.2f} MB")
+                _log.info(f"VRAM reserved before cleanup: {mem_reserved_before:.2f} MB")
         except Exception:
             pass
 
@@ -285,6 +310,16 @@ async def cleanup_models_if_needed(orchestrator: BaseOrchestrator):
                                     pass
                         except Exception:
                             pass
+
+                # Force all CUDA tensors to be moved to CPU and deleted
+                for obj_id in list(torch.cuda.memory._allocated_objects()):
+                    try:
+                        obj = torch.cuda.memory._allocated_objects[obj_id]
+                        if hasattr(obj, 'cpu'):
+                            obj = obj.cpu()
+                            del obj
+                    except Exception:
+                        pass
         except Exception as e:
             _log.warning(f"Failed to move models to CPU: {e}")
 
@@ -328,65 +363,451 @@ async def cleanup_models_if_needed(orchestrator: BaseOrchestrator):
         except Exception as e:
             _log.debug(f"Manual cache clear: {e}")
 
-        # Step 4: Force aggressive garbage collection
+        # Step 4: Force aggressive garbage collection with memory optimization
         import gc
         _log.info("Running aggressive garbage collection...")
+
+        # Collect all generations multiple times to ensure proper cleanup
+        for generation in range(3):  # Run through all generations
+            gc.collect(generation)
+
+        # Run additional full collections
         for _ in range(5):
             gc.collect()
-        gc.collect(2)  # Full collection including generation 2
 
-        # Step 5: Try to force ONNX Runtime CUDA cleanup
+        # Force a final full collection
+        gc.collect(2)  # Generation 2 collection
+
+        # Step 5: Try to force ONNX Runtime CUDA cleanup with more aggressive approach
         try:
             import onnxruntime as ort
             providers = ort.get_available_providers()
             if 'CUDAExecutionProvider' in providers:
                 _log.info("ONNX Runtime CUDA provider detected, forcing cleanup...")
+
+                # More aggressive ONNX Runtime cleanup approach
+                # Clear any provider options and recreate sessions
+                ort.capi._pybind_state.clear_session_pools()
+
                 # Trick: Creating and immediately destroying a session sometimes triggers
                 # ONNX Runtime to release cached CUDA allocations
-                # This is a workaround since ONNX Runtime has no official cleanup API
-                import gc
-                gc.collect()
+                try:
+                    dummy_session = ort.InferenceSession(''.encode(), providers=['CPUExecutionProvider'])
+                    del dummy_session
+                except Exception:
+                    pass
+
+                # Additional garbage collection
                 gc.collect()
         except Exception as e:
             _log.debug(f"ONNX Runtime cleanup attempt: {e}")
 
-        # Step 6: Explicitly free CUDA memory
+        # Step 6: Enhanced CUDA memory cleanup with PyTorch best practices
         try:
             import torch
             if torch.cuda.is_available():
-                _log.info("Clearing CUDA cache...")
-                # Clear CUDA cache multiple times
+                _log.info("Clearing CUDA cache with enhanced cleanup...")
+
+                # Get initial memory state
+                device_count = torch.cuda.device_count()
+
+                for device_id in range(device_count):
+                    with torch.cuda.device(device_id):
+                        _log.info(f"Cleaning up device {device_id}...")
+
+                        # Step 6a: Clear all cache
+                        torch.cuda.empty_cache()
+
+                        # Step 6b: Release all cached memory blocks
+                        if hasattr(torch.cuda, 'memory_summary'):
+                            _log.debug(f"Memory summary before cleanup: {torch.cuda.memory_summary(device_id)}")
+
+                        # Step 6c: Reset memory accounting
+                        torch.cuda.reset_peak_memory_stats()
+                        torch.cuda.reset_accumulated_memory_stats()
+
+                        # Step 6d: Force context cleanup using per-process memory fraction approach
+                        # This technique helps release CUDA context overhead
+                        try:
+                            # Set to minimal fraction to force release
+                            torch.cuda.set_per_process_memory_fraction(0.01, device_id)
+                            torch.cuda.empty_cache()
+
+                            # Force synchronization to ensure all operations complete
+                            torch.cuda.synchronize()
+
+                            # Reset to normal fraction (1.0 means no limit)
+                            torch.cuda.set_per_process_memory_fraction(1.0, device_id)
+                        except Exception:
+                            pass
+
+                        # Step 6e: Additional cleanup techniques
+                        try:
+                            # Try to release memory pool (PyTorch 1.10+)
+                            if hasattr(torch.cuda, 'release_memory'):
+                                torch.cuda.release_memory()
+                        except Exception:
+                            pass
+
+                        # Final synchronization and cache clear
+                        torch.cuda.synchronize()
+                        torch.cuda.empty_cache()
+
+                # Step 6f: Global cleanup across all devices
                 torch.cuda.empty_cache()
                 torch.cuda.synchronize()
 
-                # Reset peak memory stats
-                torch.cuda.reset_peak_memory_stats()
-                torch.cuda.reset_accumulated_memory_stats()
-
-                # Try to set memory fraction to minimal (releases reserved memory)
+                # Step 6g: Clear CUDA context if possible (advanced technique)
                 try:
-                    for device_id in range(torch.cuda.device_count()):
-                        torch.cuda.set_per_process_memory_fraction(0.0, device_id)
-                        torch.cuda.empty_cache()
-                        torch.cuda.set_per_process_memory_fraction(1.0, device_id)
+                    # Force CUDA context reset by creating and destroying a tensor
+                    for device_id in range(device_count):
+                        with torch.cuda.device(device_id):
+                            x = torch.tensor([1.0], device=f'cuda:{device_id}')
+                            del x
+                            torch.cuda.empty_cache()
                 except Exception:
                     pass
 
-                # Final empty cache calls
-                torch.cuda.empty_cache()
-                torch.cuda.synchronize()
-
+                # Step 6h: Final memory state reporting
                 mem_after = torch.cuda.memory_allocated() / 1024**2
                 mem_reserved = torch.cuda.memory_reserved() / 1024**2
+                mem_total = torch.cuda.get_device_properties(0).total_memory / 1024**2
+
                 _log.info(f"VRAM allocated after cleanup: {mem_after:.2f} MB")
                 _log.info(f"VRAM reserved after cleanup: {mem_reserved:.2f} MB")
-                _log.info("CUDA cache cleared and synchronized")
+                _log.info(f"Total VRAM: {mem_total:.2f} MB")
+                _log.info("Enhanced CUDA cache cleared and synchronized")
 
-                # If still significant memory, log warning
-                if mem_after > 100:
-                    _log.warning(f"VRAM still has {mem_after:.2f} MB allocated - this may be CUDA context overhead")
+                # Step 6i: Memory usage analysis
+                vram_usage_percent = (mem_reserved / mem_total) * 100
+                if vram_usage_percent > 5:
+                    _log.warning(f"VRAM usage is still {vram_usage_percent:.1f}% ({mem_reserved:.2f} MB) - this may indicate CUDA context overhead or memory leaks")
+                else:
+                    _log.info(f"VRAM cleanup successful: {vram_usage_percent:.1f}% usage remaining")
+
         except Exception as e:
             _log.warning(f"Failed to clear CUDA cache: {e}")
+
+
+def ocr_worker_process(input_queue: multiprocessing.Queue, output_queue: multiprocessing.Queue,
+                       worker_id: int, timeout: int = 300):
+    """
+    Worker process for OCR processing that runs in a separate process.
+    This ensures complete memory isolation and cleanup when the process exits.
+
+    Args:
+        input_queue: Queue for incoming OCR tasks
+        output_queue: Queue for OCR results
+        worker_id: Unique identifier for this worker
+        timeout: Process timeout in seconds
+    """
+    import traceback
+    import json
+    import tempfile
+    import time
+    from pathlib import Path
+
+    # Set up process-specific logging
+    process_log = logging.getLogger(f"ocr_worker_{worker_id}")
+
+    try:
+        # Import docling components inside the worker process
+        from docling.datamodel.base_models import DocumentStream
+        from docling.document_converter import DocumentConverter
+
+        # Initialize converter in this process
+        converter = DocumentConverter()
+        process_log.info(f"OCR worker {worker_id} initialized")
+
+        # Signal that worker is ready
+        output_queue.put({
+            "worker_id": worker_id,
+            "status": "ready"
+        })
+
+        while True:
+            try:
+                # Wait for task with timeout
+                try:
+                    task_data = input_queue.get(timeout=1.0)
+                except Exception:
+                    # Check if we should exit (empty queue might mean shutdown)
+                    continue
+
+                if task_data is None:  # Shutdown signal
+                    process_log.info(f"OCR worker {worker_id} received shutdown signal")
+                    break
+
+                # Process the task
+                task_id = task_data.get("task_id")
+                file_data = task_data.get("file_data")
+                file_name = task_data.get("file_name", "document.pdf")
+                options = task_data.get("options", {})
+
+                process_log.info(f"Worker {worker_id} processing task {task_id}")
+
+                start_time = time.time()
+
+                # Create temporary file for processing
+                with tempfile.NamedTemporaryFile(delete=False, suffix=Path(file_name).suffix) as temp_file:
+                    temp_file.write(file_data)
+                    temp_file_path = temp_file.name
+
+                try:
+                    # Create DocumentStream from temporary file
+                    with open(temp_file_path, 'rb') as f:
+                        doc_stream = DocumentStream(name=file_name, stream=f.read())
+
+                    # Convert document
+                    result = converter.convert(doc_stream)
+
+                    # Serialize result for sending back to main process
+                    result_data = {
+                        "worker_id": worker_id,
+                        "task_id": task_id,
+                        "status": "success",
+                        "result": result.document.export_to_dict(),
+                        "processing_time": time.time() - start_time
+                    }
+
+                except Exception as process_error:
+                    error_data = {
+                        "worker_id": worker_id,
+                        "task_id": task_id,
+                        "status": "error",
+                        "error": str(process_error),
+                        "traceback": traceback.format_exc(),
+                        "processing_time": time.time() - start_time
+                    }
+                    result_data = error_data
+
+                finally:
+                    # Clean up temporary file
+                    try:
+                        os.unlink(temp_file_path)
+                    except Exception:
+                        pass
+
+                # Send result back
+                output_queue.put(result_data)
+
+            except Exception as e:
+                process_log.error(f"Worker {worker_id} error: {e}")
+                output_queue.put({
+                    "worker_id": worker_id,
+                    "status": "worker_error",
+                    "error": str(e),
+                    "traceback": traceback.format_exc()
+                })
+
+    except KeyboardInterrupt:
+        process_log.info(f"OCR worker {worker_id} interrupted")
+    except Exception as e:
+        process_log.error(f"OCR worker {worker_id} fatal error: {e}")
+        output_queue.put({
+            "worker_id": worker_id,
+            "status": "fatal_error",
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        })
+    finally:
+        process_log.info(f"OCR worker {worker_id} shutting down")
+
+
+class OCRProcessManager:
+    """
+    Manager for OCR worker processes with complete memory isolation.
+    This provides an alternative to in-process OCR processing for better VRAM management.
+    """
+
+    def __init__(self, num_workers: int = 1, process_timeout: int = 300):
+        self.num_workers = num_workers
+        self.process_timeout = process_timeout
+        self.input_queue = multiprocessing.Queue()
+        self.output_queue = multiprocessing.Queue()
+        self.workers = []
+        self.worker_ready = set()
+        self.task_results = {}
+        self.pending_tasks = {}
+
+    def start_workers(self):
+        """Start OCR worker processes."""
+        if self.workers:
+            _log.warning("OCR workers are already running")
+            return
+
+        _log.info(f"Starting {self.num_workers} OCR worker processes")
+
+        for i in range(self.num_workers):
+            try:
+                process = multiprocessing.Process(
+                    target=ocr_worker_process,
+                    args=(self.input_queue, self.output_queue, i, self.process_timeout)
+                )
+                process.daemon = True  # Daemon processes will be cleaned up on exit
+                process.start()
+                self.workers.append(process)
+                _log.info(f"Started OCR worker {i} with PID {process.pid}")
+            except Exception as e:
+                _log.error(f"Failed to start OCR worker {i}: {e}")
+
+        # Wait for workers to be ready
+        self._wait_for_workers_ready()
+
+    def _wait_for_workers_ready(self, timeout: int = 30):
+        """Wait for all workers to signal they're ready."""
+        import time
+        start_time = time.time()
+
+        while len(self.worker_ready) < self.num_workers and time.time() - start_time < timeout:
+            try:
+                # Check for ready messages
+                while not self.output_queue.empty():
+                    try:
+                        message = self.output_queue.get_nowait()
+                        if message.get("status") == "ready":
+                            self.worker_ready.add(message["worker_id"])
+                            _log.info(f"OCR worker {message['worker_id']} is ready")
+                    except Exception:
+                        break
+
+                time.sleep(0.1)
+            except Exception as e:
+                _log.error(f"Error waiting for workers: {e}")
+                break
+
+        if len(self.worker_ready) < self.num_workers:
+            _log.warning(f"Only {len(self.worker_ready)}/{self.num_workers} workers are ready")
+        else:
+            _log.info(f"All {self.num_workers} OCR workers are ready")
+
+    def submit_task(self, task_id: str, file_data: bytes, file_name: str, options: dict = None):
+        """Submit an OCR task to the worker pool."""
+        if not self.workers:
+            self.start_workers()
+
+        if options is None:
+            options = {}
+
+        task_data = {
+            "task_id": task_id,
+            "file_data": file_data,
+            "file_name": file_name,
+            "options": options
+        }
+
+        try:
+            self.input_queue.put(task_data)
+            self.pending_tasks[task_id] = task_data
+            _log.info(f"Submitted OCR task {task_id} to worker pool")
+            return True
+        except Exception as e:
+            _log.error(f"Failed to submit OCR task {task_id}: {e}")
+            return False
+
+    def collect_results(self, timeout: int = 1.0):
+        """Collect available results from workers."""
+        import time
+        start_time = time.time()
+
+        while time.time() - start_time < timeout:
+            try:
+                result = self.output_queue.get_nowait()
+                task_id = result.get("task_id")
+                if task_id:
+                    self.task_results[task_id] = result
+                    if task_id in self.pending_tasks:
+                        del self.pending_tasks[task_id]
+
+                    status = result.get("status", "unknown")
+                    if status == "success":
+                        _log.info(f"OCR task {task_id} completed successfully")
+                    else:
+                        _log.error(f"OCR task {task_id} failed: {result.get('error', 'Unknown error')}")
+                else:
+                    # Handle worker status messages
+                    worker_id = result.get("worker_id")
+                    status = result.get("status")
+                    if status in ["worker_error", "fatal_error"]:
+                        _log.error(f"Worker {worker_id} error: {result.get('error', 'Unknown error')}")
+                        # Restart failed worker
+                        self._restart_worker(worker_id)
+            except Exception:
+                break
+
+        return list(self.task_results.values())
+
+    def _restart_worker(self, failed_worker_id: int):
+        """Restart a failed worker process."""
+        try:
+            # Terminate the failed worker if it's still running
+            if failed_worker_id < len(self.workers):
+                worker = self.workers[failed_worker_id]
+                if worker.is_alive():
+                    worker.terminate()
+                    worker.join(timeout=5)
+
+                # Remove from ready set
+                self.worker_ready.discard(failed_worker_id)
+
+                # Start new worker
+                process = multiprocessing.Process(
+                    target=ocr_worker_process,
+                    args=(self.input_queue, self.output_queue, failed_worker_id, self.process_timeout)
+                )
+                process.daemon = True
+                process.start()
+                self.workers[failed_worker_id] = process
+                _log.info(f"Restarted OCR worker {failed_worker_id} with PID {process.pid}")
+        except Exception as e:
+            _log.error(f"Failed to restart worker {failed_worker_id}: {e}")
+
+    def get_task_result(self, task_id: str):
+        """Get result for a specific task."""
+        self.collect_results()  # Collect any pending results
+        return self.task_results.get(task_id)
+
+    def shutdown(self):
+        """Shutdown all worker processes."""
+        _log.info("Shutting down OCR worker processes")
+
+        # Send shutdown signals to all workers
+        for _ in range(self.num_workers):
+            try:
+                self.input_queue.put(None)
+            except Exception:
+                pass
+
+        # Wait for workers to shutdown gracefully
+        for i, worker in enumerate(self.workers):
+            try:
+                if worker.is_alive():
+                    worker.join(timeout=5)
+                    if worker.is_alive():
+                        _log.warning(f"Worker {i} did not shutdown gracefully, terminating")
+                        worker.terminate()
+                        worker.join(timeout=2)
+            except Exception as e:
+                _log.error(f"Error shutting down worker {i}: {e}")
+
+        self.workers = []
+        self.worker_ready = set()
+        _log.info("OCR worker processes shutdown complete")
+
+
+# Global OCR process manager instance (will be initialized in lifespan)
+_ocr_process_manager: OCRProcessManager | None = None
+
+
+def get_ocr_process_manager() -> OCRProcessManager:
+    """Get the global OCR process manager instance."""
+    global _ocr_process_manager
+    if _ocr_process_manager is None:
+        _ocr_process_manager = OCRProcessManager(
+            num_workers=getattr(docling_serve_settings, 'ocr_worker_processes', 1),
+            process_timeout=getattr(docling_serve_settings, 'ocr_process_timeout', 300)
+        )
+    return _ocr_process_manager
 
 
 async def cleanup_models_after_task(orchestrator: BaseOrchestrator, task_id: str):

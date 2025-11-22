@@ -68,6 +68,11 @@ class DoclingServeSettings(BaseSettings):
     allow_external_plugins: bool = False
     show_version_info: bool = True
 
+    # OCR worker process settings (for complete memory isolation)
+    use_ocr_worker_processes: bool = False
+    ocr_worker_processes: int = 1
+    ocr_process_timeout: int = 300  # seconds
+
     api_key: str = ""
 
     max_document_timeout: float = 3_600 * 24 * 7  # 7 days
