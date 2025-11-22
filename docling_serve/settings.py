@@ -51,6 +51,15 @@ class DoclingServeSettings(BaseSettings):
     cleanup_poll_interval: float = 5.0  # seconds
     options_cache_size: int = 2
 
+    # Advanced VRAM cleanup settings
+    aggressive_vram_cleanup: bool = True  # Enable aggressive GPU memory cleanup
+    vram_cleanup_warning_threshold_mb: float = 100.0  # Warn if VRAM > threshold after cleanup
+    force_garbage_collection: bool = True  # Force Python garbage collection during cleanup
+    cuda_context_reset: bool = False  # Attempt CUDA context reset (experimental, may cause instability)
+    memory_logging_enabled: bool = True  # Enable detailed memory usage logging
+    cleanup_retry_attempts: int = 3  # Number of retry attempts for memory cleanup
+    cleanup_retry_delay: float = 1.0  # Delay between cleanup retries (seconds)
+
     # External model unloading (for low VRAM systems)
     unload_ollama_base_url: Optional[str] = None
     unload_ollama_model: Optional[str] = None

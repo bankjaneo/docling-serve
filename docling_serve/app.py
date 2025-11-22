@@ -1,5 +1,6 @@
 import asyncio
 import copy
+import gc
 import importlib.metadata
 import logging
 import shutil
@@ -9,6 +10,21 @@ from io import BytesIO
 from typing import Annotated
 
 import httpx
+
+# Memory management imports
+try:
+    import torch
+    TORCH_AVAILABLE = True
+except ImportError:
+    TORCH_AVAILABLE = False
+    torch = None
+
+try:
+    import psutil
+    PSUTIL_AVAILABLE = True
+except ImportError:
+    PSUTIL_AVAILABLE = False
+    psutil = None
 
 from fastapi import (
     BackgroundTasks,
@@ -218,21 +234,176 @@ async def _unload_ollama(base_url: str, model_name: str):
         raise
 
 
+def get_vram_usage() -> dict:
+    """Get current VRAM usage statistics."""
+    vram_info = {"available": False, "allocated_mb": 0, "cached_mb": 0, "max_allocated_mb": 0}
+
+    if TORCH_AVAILABLE and torch.cuda.is_available():
+        try:
+            allocated = torch.cuda.memory_allocated() / 1024**2  # Convert to MB
+            cached = torch.cuda.memory_reserved() / 1024**2   # Convert to MB
+            max_allocated = torch.cuda.max_memory_allocated() / 1024**2
+
+            vram_info.update({
+                "available": True,
+                "allocated_mb": round(allocated, 2),
+                "cached_mb": round(cached, 2),
+                "max_allocated_mb": round(max_allocated, 2),
+                "device_count": torch.cuda.device_count(),
+                "current_device": torch.cuda.current_device()
+            })
+        except Exception as e:
+            _log.warning(f"Failed to get VRAM usage: {e}")
+
+    return vram_info
+
+
+def log_memory_usage(context: str = ""):
+    """Log current memory usage for debugging."""
+    if not docling_serve_settings.memory_logging_enabled:
+        return
+
+    vram_info = get_vram_usage()
+
+    if vram_info["available"]:
+        _log.info(f"{context} - VRAM Usage: {vram_info['allocated_mb']}MB allocated, "
+                 f"{vram_info['cached_mb']}MB cached, {vram_info['max_allocated_mb']}MB max allocated")
+    else:
+        _log.info(f"{context} - CUDA not available or torch not installed")
+
+
+def force_cleanup_gpu_memory():
+    """Force cleanup of GPU memory with multiple approaches."""
+    if not docling_serve_settings.aggressive_vram_cleanup:
+        return
+
+    cleanup_attempts = []
+
+    # Force garbage collection
+    if docling_serve_settings.force_garbage_collection:
+        try:
+            gc.collect()
+            cleanup_attempts.append("gc.collect()")
+        except Exception as e:
+            _log.warning(f"Failed to run garbage collection: {e}")
+
+    # PyTorch CUDA cleanup
+    if TORCH_AVAILABLE and torch.cuda.is_available():
+        try:
+            # Clear cache
+            torch.cuda.empty_cache()
+            cleanup_attempts.append("torch.cuda.empty_cache()")
+
+            # Reset peak memory stats
+            torch.cuda.reset_peak_memory_stats()
+            cleanup_attempts.append("torch.cuda.reset_peak_memory_stats()")
+
+            # Force synchronization
+            torch.cuda.synchronize()
+            cleanup_attempts.append("torch.cuda.synchronize()")
+
+            # Experimental CUDA context reset
+            if docling_serve_settings.cuda_context_reset:
+                try:
+                    # Attempt to release CUDA context
+                    current_device = torch.cuda.current_device()
+                    _log.warning(f"Attempting experimental CUDA context reset on device {current_device}")
+                    # This is experimental and may cause instability
+                    torch.cuda.set_device(current_device)
+                    torch.cuda.empty_cache()
+                    cleanup_attempts.append("cuda_context_reset")
+                except Exception as e:
+                    _log.warning(f"Failed to reset CUDA context: {e}")
+
+            # Additional cleanup for all CUDA devices
+            for i in range(torch.cuda.device_count()):
+                try:
+                    with torch.cuda.device(i):
+                        torch.cuda.empty_cache()
+                except Exception as e:
+                    _log.warning(f"Failed to clear cache for device {i}: {e}")
+
+        except Exception as e:
+            _log.warning(f"Failed to cleanup CUDA memory: {e}")
+
+    _log.info(f"GPU memory cleanup attempted: {', '.join(cleanup_attempts)}")
+
+    # Log memory usage after cleanup
+    log_memory_usage("After GPU cleanup")
+
+
+async def cleanup_with_retry(orchestrator: BaseOrchestrator):
+    """Attempt model cleanup with retry logic."""
+    max_attempts = docling_serve_settings.cleanup_retry_attempts
+    retry_delay = docling_serve_settings.cleanup_retry_delay
+
+    for attempt in range(max_attempts):
+        try:
+            _log.info(f"Cleanup attempt {attempt + 1}/{max_attempts}")
+
+            # Standard cleanup
+            await orchestrator.clear_converters()
+
+            # Force GPU cleanup
+            force_cleanup_gpu_memory()
+
+            # Check if cleanup was successful
+            vram_info = get_vram_usage()
+            if not vram_info["available"] or vram_info["allocated_mb"] <= docling_serve_settings.vram_cleanup_warning_threshold_mb:
+                _log.info("Cleanup successful - VRAM usage within acceptable limits")
+                return True
+            else:
+                _log.warning(f"VRAM usage still high after cleanup attempt {attempt + 1}: {vram_info['allocated_mb']:.2f}MB")
+
+        except Exception as e:
+            _log.warning(f"Cleanup attempt {attempt + 1} failed: {e}")
+
+        # Wait before retry (except on last attempt)
+        if attempt < max_attempts - 1:
+            await asyncio.sleep(retry_delay)
+
+    return False
+
+
 async def ensure_models_loaded(orchestrator: BaseOrchestrator):
     """Ensure models are loaded before processing if lazy loading is enabled."""
     if docling_serve_settings.free_vram_on_idle:
         # First, unload external models to free VRAM if configured
         await unload_external_models()
+
+        # Log memory before loading models
+        log_memory_usage("Before loading Docling models")
+
         # Then load Docling models
         _log.info("Loading models for processing...")
         await orchestrator.warm_up_caches()
+
+        # Log memory after loading models
+        log_memory_usage("After loading Docling models")
 
 
 async def cleanup_models_if_needed(orchestrator: BaseOrchestrator):
     """Clear models after processing if lazy loading is enabled to free VRAM."""
     if docling_serve_settings.free_vram_on_idle:
+        # Log memory before cleanup
+        log_memory_usage("Before model cleanup")
+
         _log.info("Clearing models to free VRAM...")
-        await orchestrator.clear_converters()
+
+        # Use retry mechanism if aggressive cleanup is enabled
+        if docling_serve_settings.aggressive_vram_cleanup:
+            success = await cleanup_with_retry(orchestrator)
+            if not success:
+                _log.warning("All cleanup attempts completed - VRAM usage may still be high")
+        else:
+            # Standard cleanup without retry
+            await orchestrator.clear_converters()
+            force_cleanup_gpu_memory()
+
+        # Final memory check with configurable threshold
+        final_vram = get_vram_usage()
+        if final_vram["available"] and final_vram["allocated_mb"] > docling_serve_settings.vram_cleanup_warning_threshold_mb:
+            _log.warning(f"VRAM still has {final_vram['allocated_mb']:.2f} MB allocated - this may be CUDA context overhead")
 
 
 async def cleanup_models_background(orchestrator: BaseOrchestrator, task_id: str):

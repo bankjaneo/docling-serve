@@ -52,6 +52,13 @@ THe following table describes the options to configure the Docling Serve app.
 |  | `DOCLING_SERVE_LOAD_MODELS_AT_BOOT` | `True` | If enabled, the models for the default options will be loaded at boot. |
 |  | `DOCLING_SERVE_FREE_VRAM_ON_IDLE` | `False` | If enabled, OCR models are loaded only before processing and unloaded after completion to free VRAM. Useful for low VRAM systems and Docker deployments. When enabled, `LOAD_MODELS_AT_BOOT` is automatically disabled. |
 |  | `DOCLING_SERVE_CLEANUP_POLL_INTERVAL` | `5.0` | Polling interval (in seconds) for checking task completion when `FREE_VRAM_ON_IDLE` is enabled. The background cleanup task checks at this interval whether a task has finished before unloading models. |
+|  | `DOCLING_SERVE_AGGRESSIVE_VRAM_CLEANUP` | `True` | Enable aggressive GPU memory cleanup including multiple cleanup attempts and advanced memory management techniques when `FREE_VRAM_ON_IDLE` is enabled. |
+|  | `DOCLING_SERVE_VRAM_CLEANUP_WARNING_THRESHOLD_MB` | `100.0` | Warning threshold in MB - if VRAM usage exceeds this value after cleanup, a warning will be logged. |
+|  | `DOCLING_SERVE_FORCE_GARBAGE_COLLECTION` | `True` | Force Python garbage collection during VRAM cleanup to help release memory held by Python objects. |
+|  | `DOCLING_SERVE_CUDA_CONTEXT_RESET` | `False` | Experimental: Attempt CUDA context reset during cleanup (may cause instability). Only enable if standard cleanup is insufficient. |
+|  | `DOCLING_SERVE_MEMORY_LOGGING_ENABLED` | `True` | Enable detailed memory usage logging during model loading/unloading for debugging VRAM issues. |
+|  | `DOCLING_SERVE_CLEANUP_RETRY_ATTEMPTS` | `3` | Number of retry attempts for VRAM cleanup when aggressive cleanup is enabled. |
+|  | `DOCLING_SERVE_CLEANUP_RETRY_DELAY` | `1.0` | Delay in seconds between VRAM cleanup retry attempts. |
 |  | `DOCLING_SERVE_UNLOAD_OLLAMA_BASE_URL` | unset | Optional: URL of Ollama API (e.g., `http://localhost:11434`). When set with `FREE_VRAM_ON_IDLE=True`, Docling will unload Ollama models before loading its own models. Useful for systems with low VRAM that integrate Docling with Open WebUI or other Ollama-based applications. |
 |  | `DOCLING_SERVE_UNLOAD_OLLAMA_MODEL` | unset | Optional: Name of the Ollama model to unload (e.g., `llama3.2`). Required if `UNLOAD_OLLAMA_BASE_URL` is set. |
 |  | `DOCLING_SERVE_UNLOAD_LLAMA_SWAP_BASE_URL` | unset | Optional: URL of llama-swap API (e.g., `http://localhost:9292`). When set with `FREE_VRAM_ON_IDLE=True`, Docling will unload llama.cpp models before loading its own models. Any path components (like `/v1`) will be automatically stripped to use only the base URL. Useful for systems with low VRAM. |
