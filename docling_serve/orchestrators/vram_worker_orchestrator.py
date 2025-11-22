@@ -122,7 +122,7 @@ def _worker_process_entry(
 
             def model_dump(self, serialize_as_any=True):
                 return {
-                    "backend": self.backend,
+                    "backend": self.backend.value,  # Pass the enum value (string) instead of the enum object
                     "pipeline_options": self.pipeline_options,
                     "pipeline_cls": self.pipeline_cls,
                     "backend_options": self.backend_options
