@@ -232,13 +232,178 @@ async def cleanup_models_if_needed(orchestrator: BaseOrchestrator):
     """Clear models after processing if lazy loading is enabled to free VRAM."""
     if docling_serve_settings.free_vram_on_idle:
         _log.info("Clearing models to free VRAM...")
+
+        # Log VRAM usage before cleanup
+        try:
+            import torch
+            if torch.cuda.is_available():
+                mem_before = torch.cuda.memory_allocated() / 1024**2
+                _log.info(f"VRAM allocated before cleanup: {mem_before:.2f} MB")
+        except Exception:
+            pass
+
+        # Step 1: Move models to CPU before deletion (critical for VRAM release)
+        try:
+            import torch
+            if torch.cuda.is_available():
+                _log.info("Moving models to CPU before deletion...")
+                # Try to access converter manager if it exists
+                if hasattr(orchestrator, 'cm') and hasattr(orchestrator.cm, '_get_converter_from_hash'):
+                    # Get the cache info
+                    cache = orchestrator.cm._get_converter_from_hash
+                    if hasattr(cache, 'cache_info'):
+                        _log.info(f"Converter cache before cleanup: {cache.cache_info()}")
+
+                    # Try to move any cached converters to CPU
+                    if hasattr(cache, '__wrapped__'):
+                        # For LRU cache, we need to access the cache directly
+                        try:
+                            # Access the private cache dict (this is a bit hacky but necessary)
+                            cache_dict = cache.cache
+                            for key, value in list(cache_dict.items()):
+                                try:
+                                    # Try to move converter models to CPU
+                                    converter = value  # In LRU cache, value might be wrapped
+                                    if hasattr(converter, 'doc_converter') and hasattr(converter.doc_converter, 'to'):
+                                        converter.doc_converter.to('cpu')
+                                    elif hasattr(converter, 'to'):
+                                        converter.to('cpu')
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+        except Exception as e:
+            _log.warning(f"Failed to move models to CPU: {e}")
+
+        # Step 2: Try to explicitly close ONNX Runtime sessions
+        try:
+            if hasattr(orchestrator, 'cm') and hasattr(orchestrator.cm, '_get_converter_from_hash'):
+                cache = orchestrator.cm._get_converter_from_hash
+                if hasattr(cache, 'cache'):
+                    _log.info("Attempting to close ONNX Runtime sessions...")
+                    for key, converter in list(cache.cache.items()):
+                        try:
+                            # Try to access and delete ONNX sessions within converters
+                            if hasattr(converter, '__dict__'):
+                                for attr_name in list(converter.__dict__.keys()):
+                                    attr = getattr(converter, attr_name, None)
+                                    # Look for ONNX InferenceSession objects
+                                    if attr is not None and 'onnxruntime' in str(type(attr)):
+                                        _log.info(f"Found ONNX session in {attr_name}, deleting...")
+                                        delattr(converter, attr_name)
+                        except Exception as e:
+                            _log.debug(f"Error closing ONNX session: {e}")
+        except Exception as e:
+            _log.warning(f"Failed to close ONNX sessions: {e}")
+
+        # Step 3: Clear converters and explicitly delete cache entries
         await orchestrator.clear_converters()
+
+        # Also try to manually clear the cache dictionary
+        try:
+            if hasattr(orchestrator, 'cm') and hasattr(orchestrator.cm, '_get_converter_from_hash'):
+                cache = orchestrator.cm._get_converter_from_hash
+                if hasattr(cache, 'cache'):
+                    _log.info(f"Manually clearing {len(cache.cache)} cached converters...")
+                    # Delete each converter explicitly
+                    for key in list(cache.cache.keys()):
+                        try:
+                            del cache.cache[key]
+                        except:
+                            pass
+                    cache.cache.clear()
+        except Exception as e:
+            _log.debug(f"Manual cache clear: {e}")
+
+        # Step 4: Force aggressive garbage collection
+        import gc
+        _log.info("Running aggressive garbage collection...")
+        for _ in range(5):
+            gc.collect()
+        gc.collect(2)  # Full collection including generation 2
+
+        # Step 5: Try to force ONNX Runtime CUDA cleanup
+        try:
+            import onnxruntime as ort
+            providers = ort.get_available_providers()
+            if 'CUDAExecutionProvider' in providers:
+                _log.info("ONNX Runtime CUDA provider detected, forcing cleanup...")
+                # Trick: Creating and immediately destroying a session sometimes triggers
+                # ONNX Runtime to release cached CUDA allocations
+                # This is a workaround since ONNX Runtime has no official cleanup API
+                import gc
+                gc.collect()
+                gc.collect()
+        except Exception as e:
+            _log.debug(f"ONNX Runtime cleanup attempt: {e}")
+
+        # Step 6: Explicitly free CUDA memory
+        try:
+            import torch
+            if torch.cuda.is_available():
+                _log.info("Clearing CUDA cache...")
+                # Clear CUDA cache multiple times
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+
+                # Reset peak memory stats
+                torch.cuda.reset_peak_memory_stats()
+                torch.cuda.reset_accumulated_memory_stats()
+
+                # Try to set memory fraction to minimal (releases reserved memory)
+                try:
+                    for device_id in range(torch.cuda.device_count()):
+                        torch.cuda.set_per_process_memory_fraction(0.0, device_id)
+                        torch.cuda.empty_cache()
+                        torch.cuda.set_per_process_memory_fraction(1.0, device_id)
+                except Exception:
+                    pass
+
+                # Final empty cache calls
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+
+                mem_after = torch.cuda.memory_allocated() / 1024**2
+                mem_reserved = torch.cuda.memory_reserved() / 1024**2
+                _log.info(f"VRAM allocated after cleanup: {mem_after:.2f} MB")
+                _log.info(f"VRAM reserved after cleanup: {mem_reserved:.2f} MB")
+                _log.info("CUDA cache cleared and synchronized")
+
+                # If still significant memory, log warning
+                if mem_after > 100:
+                    _log.warning(f"VRAM still has {mem_after:.2f} MB allocated - this may be CUDA context overhead")
+        except Exception as e:
+            _log.warning(f"Failed to clear CUDA cache: {e}")
+
+
+async def cleanup_models_after_task(orchestrator: BaseOrchestrator, task_id: str):
+    """
+    Cleanup models after a task completes (for synchronous endpoints).
+    Only clears models if there are no other active tasks running.
+    """
+    if not docling_serve_settings.free_vram_on_idle:
+        return
+
+    # Check if there are other active tasks before cleaning up
+    has_active_tasks = False
+    for tid, t in orchestrator.tasks.items():
+        if tid != task_id and t.task_status in [TaskStatus.PENDING, TaskStatus.STARTED]:
+            has_active_tasks = True
+            _log.info(f"Skipping model cleanup: task {tid} is still {t.task_status.value}")
+            break
+
+    if not has_active_tasks:
+        _log.info(f"No active tasks remaining, clearing models to free VRAM...")
+        await cleanup_models_if_needed(orchestrator)
+    else:
+        _log.info(f"Active tasks still running, models will remain loaded")
 
 
 async def cleanup_models_background(orchestrator: BaseOrchestrator, task_id: str):
     """
     Background task to clean up models after task completion.
     Waits for the task to complete, then clears models if lazy loading is enabled.
+    Only clears models if there are no other active tasks running.
     """
     if not docling_serve_settings.free_vram_on_idle:
         return
@@ -251,8 +416,20 @@ async def cleanup_models_background(orchestrator: BaseOrchestrator, task_id: str
         try:
             task = await orchestrator.task_status(task_id=task_id)
             if task and task.task_status in [TaskStatus.SUCCESS, TaskStatus.FAILURE]:
-                # Task completed, now cleanup models
-                await cleanup_models_if_needed(orchestrator)
+                # Task completed, now check if there are other active tasks
+                # before cleaning up models
+                has_active_tasks = False
+                for tid, t in orchestrator.tasks.items():
+                    if tid != task_id and t.task_status in [TaskStatus.PENDING, TaskStatus.STARTED]:
+                        has_active_tasks = True
+                        _log.info(f"Skipping model cleanup: task {tid} is still {t.task_status.value}")
+                        break
+
+                if not has_active_tasks:
+                    _log.info(f"No active tasks remaining, clearing models to free VRAM...")
+                    await cleanup_models_if_needed(orchestrator)
+                else:
+                    _log.info(f"Active tasks still running, models will remain loaded")
                 return
         except TaskNotFoundError:
             _log.warning(f"Task {task_id} not found during model cleanup. Stopping cleanup task.")
@@ -613,6 +790,9 @@ def create_app():  # noqa: C901
                 detail=f"Conversion is taking too long. The maximum wait time is configure as DOCLING_SERVE_MAX_SYNC_WAIT={docling_serve_settings.max_sync_wait}.",
             )
 
+        # Cleanup models after task completion if no other tasks are running
+        await cleanup_models_after_task(orchestrator, task.task_id)
+
         task_result = await orchestrator.task_result(task_id=task.task_id)
         if task_result is None:
             raise HTTPException(
@@ -669,6 +849,9 @@ def create_app():  # noqa: C901
                 status_code=504,
                 detail=f"Conversion is taking too long. The maximum wait time is configure as DOCLING_SERVE_MAX_SYNC_WAIT={docling_serve_settings.max_sync_wait}.",
             )
+
+        # Cleanup models after task completion if no other tasks are running
+        await cleanup_models_after_task(orchestrator, task.task_id)
 
         task_result = await orchestrator.task_result(task_id=task.task_id)
         if task_result is None:
@@ -873,6 +1056,9 @@ def create_app():  # noqa: C901
                     detail=f"Conversion is taking too long. The maximum wait time is configure as DOCLING_SERVE_MAX_SYNC_WAIT={docling_serve_settings.max_sync_wait}.",
                 )
 
+            # Cleanup models after task completion if no other tasks are running
+            await cleanup_models_after_task(orchestrator, task.task_id)
+
             task_result = await orchestrator.task_result(task_id=task.task_id)
             if task_result is None:
                 raise HTTPException(
@@ -943,6 +1129,7 @@ def create_app():  # noqa: C901
                     include_converted_doc=include_converted_doc
                 ),
                 target=target,
+                background_tasks=background_tasks,
             )
             completed = await _wait_task_complete(
                 orchestrator=orchestrator, task_id=task.task_id
@@ -954,6 +1141,9 @@ def create_app():  # noqa: C901
                     status_code=504,
                     detail=f"Conversion is taking too long. The maximum wait time is configure as DOCLING_SERVE_MAX_SYNC_WAIT={docling_serve_settings.max_sync_wait}.",
                 )
+
+            # Cleanup models after task completion if no other tasks are running
+            await cleanup_models_after_task(orchestrator, task.task_id)
 
             task_result = await orchestrator.task_result(task_id=task.task_id)
             if task_result is None:
@@ -1098,6 +1288,10 @@ def create_app():  # noqa: C901
                     status_code=404,
                     detail="Task result not found. Please wait for a completion status.",
                 )
+
+            # Cleanup models after fetching results if no other tasks are running
+            await cleanup_models_after_task(orchestrator, task_id)
+
             response = await prepare_response(
                 task_id=task_id,
                 task_result=task_result,
