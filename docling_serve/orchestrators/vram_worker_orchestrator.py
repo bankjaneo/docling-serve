@@ -103,16 +103,24 @@ def _worker_process_entry(
         cm = DoclingConverterManager(config=cm_config)
 
         # Get a converter instance from the manager
-        # Try passing None first, as the docling-jobkit might have a default
-        try:
-            converter = cm.get_converter(pdf_format_option=None)
-        except TypeError:
-            # If None doesn't work, we might need to skip the parameter entirely
-            try:
-                converter = cm.get_converter()
-            except TypeError as e2:
-                # If both approaches fail, raise an informative error
-                raise ValueError(f"Unable to call get_converter with available signatures. Errors: {str(e2)}")
+        # Create a minimal PDF format option object with the required model_dump() method
+        class MinimalPdfFormatOption:
+            def __init__(self, backend=PdfBackend.DLPARSE_V4):
+                self.backend = backend
+
+            def model_dump(self, serialize_as_any=True):
+                return {"backend": self.backend.value}
+
+        # Extract pdf_backend from convert_options if available, otherwise default to DLPARSE_V4
+        pdf_backend = PdfBackend.DLPARSE_V4
+        if task_data.convert_options and 'pdf_backend' in task_data.convert_options:
+            pdf_backend_str = task_data.convert_options['pdf_backend']
+            # Convert string to PdfBackend enum
+            if hasattr(PdfBackend, pdf_backend_str.upper()):
+                pdf_backend = PdfBackend[pdf_backend_str.upper()]
+
+        pdf_format_option = MinimalPdfFormatOption(backend=pdf_backend)
+        converter = cm.get_converter(pdf_format_option=pdf_format_option)
 
         # Perform conversion
         task_type_str = task_data.task_type.upper() if isinstance(task_data.task_type, str) else task_data.task_type
