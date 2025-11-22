@@ -96,7 +96,7 @@ def _worker_process_entry(
         from pathlib import Path
 
         from docling.datamodel.pipeline_options import PdfBackend
-from docling.datamodel.base_models import FormatOptions
+        from docling.datamodel.base_models import FormatOptions
         from docling_jobkit.convert.manager import (
             DoclingConverterManager,
             DoclingConverterManagerConfig,
