@@ -270,16 +270,6 @@ def get_async_orchestrator() -> BaseOrchestrator:
             DoclingConverterManager,
             DoclingConverterManagerConfig,
         )
-        from docling_jobkit.orchestrators.local.orchestrator import (
-            LocalOrchestrator,
-            LocalOrchestratorConfig,
-        )
-
-        local_config = LocalOrchestratorConfig(
-            num_workers=docling_serve_settings.eng_loc_num_workers,
-            shared_models=docling_serve_settings.eng_loc_share_models,
-            scratch_dir=get_scratch(),
-        )
 
         cm_config = DoclingConverterManagerConfig(
             artifacts_path=docling_serve_settings.artifacts_path,
@@ -294,9 +284,64 @@ def get_async_orchestrator() -> BaseOrchestrator:
             table_batch_size=docling_serve_settings.table_batch_size,
             batch_polling_interval_seconds=docling_serve_settings.batch_polling_interval_seconds,
         )
-        cm = DoclingConverterManager(config=cm_config)
 
-        return LocalOrchestrator(config=local_config, converter_manager=cm)
+        # Use VRAM Worker Orchestrator when free_vram_on_idle is enabled
+        if docling_serve_settings.free_vram_on_idle:
+            from docling_serve.orchestrators.vram_worker_orchestrator import (
+                VRAMWorkerOrchestrator,
+                VRAMWorkerOrchestratorConfig,
+            )
+
+            _log.info(
+                "Using VRAMWorkerOrchestrator - process-based VRAM isolation enabled"
+            )
+
+            vram_config = VRAMWorkerOrchestratorConfig(
+                scratch_dir=get_scratch(),
+                worker_timeout=600,  # 10 minutes
+                max_retries=1,
+            )
+
+            # Convert cm_config to dict for worker processes
+            cm_config_dict = {
+                "artifacts_path": docling_serve_settings.artifacts_path,
+                "options_cache_size": docling_serve_settings.options_cache_size,
+                "enable_remote_services": docling_serve_settings.enable_remote_services,
+                "allow_external_plugins": docling_serve_settings.allow_external_plugins,
+                "max_num_pages": docling_serve_settings.max_num_pages,
+                "max_file_size": docling_serve_settings.max_file_size,
+                "queue_max_size": docling_serve_settings.queue_max_size,
+                "ocr_batch_size": docling_serve_settings.ocr_batch_size,
+                "layout_batch_size": docling_serve_settings.layout_batch_size,
+                "table_batch_size": docling_serve_settings.table_batch_size,
+                "batch_polling_interval_seconds": docling_serve_settings.batch_polling_interval_seconds,
+            }
+
+            return VRAMWorkerOrchestrator(
+                config=vram_config,
+                converter_manager_config=cm_config_dict,
+            )
+
+        # Use standard LocalOrchestrator when free_vram_on_idle is disabled
+        else:
+            from docling_jobkit.orchestrators.local.orchestrator import (
+                LocalOrchestrator,
+                LocalOrchestratorConfig,
+            )
+
+            _log.info(
+                "Using LocalOrchestrator - thread-based (VRAM will not be fully released)"
+            )
+
+            local_config = LocalOrchestratorConfig(
+                num_workers=docling_serve_settings.eng_loc_num_workers,
+                shared_models=docling_serve_settings.eng_loc_share_models,
+                scratch_dir=get_scratch(),
+            )
+
+            cm = DoclingConverterManager(config=cm_config)
+
+            return LocalOrchestrator(config=local_config, converter_manager=cm)
 
     elif docling_serve_settings.eng_kind == AsyncEngine.RQ:
         from docling_jobkit.orchestrators.rq.orchestrator import (

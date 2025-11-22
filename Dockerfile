@@ -63,6 +63,8 @@ ENV TESSDATA_PREFIX=/usr/share/tesseract/tessdata/ \
     DOCLING_SERVE_SYNC_POLL_INTERVAL=2 \
     DOCLING_SERVE_MAX_SYNC_WAIT=120 \
     DOCLING_SERVE_LOAD_MODELS_AT_BOOT=True \
+    # VRAM Management: Set to True for process-based isolation (complete VRAM release)
+    # False: Thread-based (faster, ~2GB VRAM accumulation) | True: Process-based (slower startup, ~50MB idle)
     DOCLING_SERVE_FREE_VRAM_ON_IDLE=False \
     DOCLING_SERVE_CLEANUP_POLL_INTERVAL=5.0 \
     DOCLING_SERVE_UNLOAD_EXTERNAL_MODEL_TIMEOUT=10.0 \
