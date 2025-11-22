@@ -303,19 +303,12 @@ def get_async_orchestrator() -> BaseOrchestrator:
             )
 
             # Convert cm_config to dict for worker processes
-            cm_config_dict = {
-                "artifacts_path": docling_serve_settings.artifacts_path,
-                "options_cache_size": docling_serve_settings.options_cache_size,
-                "enable_remote_services": docling_serve_settings.enable_remote_services,
-                "allow_external_plugins": docling_serve_settings.allow_external_plugins,
-                "max_num_pages": docling_serve_settings.max_num_pages,
-                "max_file_size": docling_serve_settings.max_file_size,
-                "queue_max_size": docling_serve_settings.queue_max_size,
-                "ocr_batch_size": docling_serve_settings.ocr_batch_size,
-                "layout_batch_size": docling_serve_settings.layout_batch_size,
-                "table_batch_size": docling_serve_settings.table_batch_size,
-                "batch_polling_interval_seconds": docling_serve_settings.batch_polling_interval_seconds,
-            }
+            # Use model_dump() for robust dict conversion (Pydantic v2)
+            try:
+                cm_config_dict = cm_config.model_dump()
+            except AttributeError:
+                # Fallback for Pydantic v1
+                cm_config_dict = cm_config.dict()
 
             return VRAMWorkerOrchestrator(
                 config=vram_config,

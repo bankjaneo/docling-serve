@@ -81,15 +81,15 @@ DOCLING_SERVE_FREE_VRAM_ON_IDLE=true
 ```
 
 When enabled:
-- Uses `VRAMWorkerOrchestrator` (process isolation)
-- Each task spawns new process
-- Complete VRAM release after completion
-- Trade-off: ~1-2s overhead per task (process spawn + model loading)
+* Uses `VRAMWorkerOrchestrator` (process isolation)
+* Each task spawns new process
+* Complete VRAM release after completion
+* Trade-off: ~1-2s overhead per task (process spawn + model loading)
 
 When disabled (default):
-- Uses `LocalOrchestrator` (thread-based)
-- Faster processing (no process spawn overhead)
-- VRAM accumulates (~2GB residual)
+* Uses `LocalOrchestrator` (thread-based)
+* Faster processing (no process spawn overhead)
+* VRAM accumulates (~2GB residual)
 
 ### Worker Process Lifecycle
 
@@ -109,10 +109,10 @@ When disabled (default):
 ### Process Spawning Strategy
 
 Uses `multiprocessing.get_context("spawn")` to ensure:
-- Clean process with no inherited CUDA state
-- Fresh Python interpreter
-- Isolated memory space
-- No shared CUDA allocators
+* Clean process with no inherited CUDA state
+* Fresh Python interpreter
+* Isolated memory space
+* No shared CUDA allocators
 
 ## Testing
 
