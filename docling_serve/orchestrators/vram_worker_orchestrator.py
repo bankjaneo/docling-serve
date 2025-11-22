@@ -90,7 +90,7 @@ def _worker_process_entry(
     try:
         # Import heavy dependencies inside worker process
         # This ensures main process doesn't load CUDA
-        from docling.datamodel.pipeline_options import PdfBackend, PdfFormatOptions
+        from docling.datamodel.pipeline_options import PdfBackend
         from docling_jobkit.convert.manager import (
             DoclingConverterManager,
             DoclingConverterManagerConfig,
@@ -103,18 +103,16 @@ def _worker_process_entry(
         cm = DoclingConverterManager(config=cm_config)
 
         # Get a converter instance from the manager
-        # Extract pdf_format_option from convert_options if available, otherwise default to PdfBackend.DLPARSE_V4
-        pdf_backend = PdfBackend.DLPARSE_V4  # Default to DLPARSE_V4
-        if task_data.convert_options and 'pdf_backend' in task_data.convert_options:
-            pdf_backend_str = task_data.convert_options['pdf_backend']
-            # Convert string to PdfBackend enum
-            if hasattr(PdfBackend, pdf_backend_str.upper()):
-                pdf_backend = PdfBackend[pdf_backend_str.upper()]
-
-        # Create PdfFormatOptions object which has model_dump()
-        pdf_format_option = PdfFormatOptions(backend=pdf_backend)
-
-        converter = cm.get_converter(pdf_format_option=pdf_format_option)
+        # Try passing None first, as the docling-jobkit might have a default
+        try:
+            converter = cm.get_converter(pdf_format_option=None)
+        except TypeError:
+            # If None doesn't work, we might need to skip the parameter entirely
+            try:
+                converter = cm.get_converter()
+            except TypeError as e2:
+                # If both approaches fail, raise an informative error
+                raise ValueError(f"Unable to call get_converter with available signatures. Errors: {str(e2)}")
 
         # Perform conversion
         task_type_str = task_data.task_type.upper() if isinstance(task_data.task_type, str) else task_data.task_type
