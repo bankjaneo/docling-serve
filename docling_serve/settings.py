@@ -96,6 +96,7 @@ class DoclingServeSettings(BaseSettings):
     eng_rq_redis_url: str = ""
     eng_rq_results_prefix: str = "docling:results"
     eng_rq_sub_channel: str = "docling:updates"
+    eng_rq_results_ttl: int = 3_600 * 4  # 4 hours default
     # KFP engine
     eng_kfp_endpoint: Optional[AnyUrl] = None
     eng_kfp_token: Optional[str] = None
@@ -105,6 +106,13 @@ class DoclingServeSettings(BaseSettings):
     eng_kfp_self_callback_ca_cert_path: Optional[Path] = None
 
     eng_kfp_experimental: bool = False
+
+    # OpenTelemetry settings
+    otel_enable_metrics: bool = True
+    otel_enable_traces: bool = False
+    otel_enable_prometheus: bool = True
+    otel_enable_otlp_metrics: bool = False
+    otel_service_name: str = "docling-serve"
 
     @model_validator(mode="after")
     def engine_settings(self) -> Self:
