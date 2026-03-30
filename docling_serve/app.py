@@ -8,7 +8,7 @@ import signal
 import time
 from contextlib import asynccontextmanager
 from io import BytesIO
-from typing import Annotated
+from typing import Annotated, Optional
 
 import httpx
 
@@ -128,7 +128,9 @@ _log = logging.getLogger(__name__)
 # When DOCLING_SERVE_MAX_TASKS_BEFORE_RESTART is set and free_vram_on_idle is enabled,
 # the server will automatically restart after processing N tasks to ensure complete VRAM cleanup
 _task_counter = 0
-_max_tasks_before_restart = int(os.getenv("DOCLING_SERVE_MAX_TASKS_BEFORE_RESTART", "0"))
+_max_tasks_before_restart = int(
+    os.getenv("DOCLING_SERVE_MAX_TASKS_BEFORE_RESTART", "0")
+)
 
 
 # Context manager to initialize and clean up the lifespan of the FastAPI app
@@ -141,7 +143,10 @@ async def lifespan(app: FastAPI):
     orchestrator.bind_notifier(notifier)
 
     # Warm up processing cache
-    if docling_serve_settings.load_models_at_boot and not docling_serve_settings.free_vram_on_idle:
+    if (
+        docling_serve_settings.load_models_at_boot
+        and not docling_serve_settings.free_vram_on_idle
+    ):
         await orchestrator.warm_up_caches()
 
     # Start the background queue processor
@@ -177,25 +182,39 @@ async def unload_external_models():
     # Unload from llama-swap if configured
     if docling_serve_settings.unload_llama_swap_base_url:
         tasks.append(
-            ("llama-swap", _unload_llama_swap(docling_serve_settings.unload_llama_swap_base_url))
+            (
+                "llama-swap",
+                _unload_llama_swap(
+                    docling_serve_settings.unload_llama_swap_base_url,
+                    docling_serve_settings.unload_llama_swap_api_key,
+                ),
+            )
         )
 
     # Unload from Ollama if configured
-    if docling_serve_settings.unload_ollama_base_url and docling_serve_settings.unload_ollama_model:
+    if (
+        docling_serve_settings.unload_ollama_base_url
+        and docling_serve_settings.unload_ollama_model
+    ):
         tasks.append(
-            ("Ollama", _unload_ollama(
-                docling_serve_settings.unload_ollama_base_url,
-                docling_serve_settings.unload_ollama_model
-            ))
+            (
+                "Ollama",
+                _unload_ollama(
+                    docling_serve_settings.unload_ollama_base_url,
+                    docling_serve_settings.unload_ollama_model,
+                ),
+            )
         )
 
     # Execute all unload tasks concurrently
     if tasks:
-        _log.info(f"Unloading external models from: {', '.join([name for name, _ in tasks])}")
+        _log.info(
+            f"Unloading external models from: {', '.join([name for name, _ in tasks])}"
+        )
         await asyncio.gather(*[task for _, task in tasks], return_exceptions=True)
 
 
-async def _unload_llama_swap(base_url: str):
+async def _unload_llama_swap(base_url: str, api_key: Optional[str] = None):
     """Unload models from llama-swap by calling the /unload endpoint."""
     # Handle case where base_url comes in as bytes from environment variable
     if isinstance(base_url, bytes):
@@ -206,15 +225,25 @@ async def _unload_llama_swap(base_url: str):
     parsed = httpx.URL(base_url)
 
     # Handle case where parsed components come as bytes
-    scheme = parsed.scheme.decode() if isinstance(parsed.scheme, bytes) else parsed.scheme
-    netloc = parsed.netloc.decode() if isinstance(parsed.netloc, bytes) else parsed.netloc
+    scheme = (
+        parsed.scheme.decode() if isinstance(parsed.scheme, bytes) else parsed.scheme
+    )
+    netloc = (
+        parsed.netloc.decode() if isinstance(parsed.netloc, bytes) else parsed.netloc
+    )
 
     clean_base_url = f"{scheme}://{netloc}"
     url = f"{clean_base_url}/unload"
 
+    # Prepare headers with API key if provided
+    headers = {}
+    if api_key:
+        headers["X-Api-Key"] = api_key
+
     try:
         async with httpx.AsyncClient(
-            timeout=docling_serve_settings.unload_external_model_timeout
+            timeout=docling_serve_settings.unload_external_model_timeout,
+            headers=headers if headers else None,
         ) as client:
             response = await client.get(url)
             response.raise_for_status()
@@ -238,7 +267,9 @@ async def _unload_ollama(base_url: str, model_name: str):
         ) as client:
             response = await client.post(url, json=payload)
             response.raise_for_status()
-            _log.info(f"Successfully unloaded Ollama model '{model_name}' at {base_url}")
+            _log.info(
+                f"Successfully unloaded Ollama model '{model_name}' at {base_url}"
+            )
     except Exception as e:
         _log.warning(f"Failed to unload Ollama model '{model_name}' at {base_url}: {e}")
         raise
@@ -262,6 +293,7 @@ async def cleanup_models_if_needed(orchestrator: BaseOrchestrator):
         # Log VRAM usage before cleanup
         try:
             import torch
+
             if torch.cuda.is_available():
                 mem_before = torch.cuda.memory_allocated() / 1024**2
                 mem_reserved_before = torch.cuda.memory_reserved() / 1024**2
@@ -273,15 +305,20 @@ async def cleanup_models_if_needed(orchestrator: BaseOrchestrator):
         # Step 1: Explicitly delete all model references and move to CPU
         try:
             import torch
+
             if torch.cuda.is_available():
                 _log.info("Moving models to CPU and deleting references...")
 
-                if hasattr(orchestrator, 'cm') and hasattr(orchestrator.cm, '_get_converter_from_hash'):
+                if hasattr(orchestrator, "cm") and hasattr(
+                    orchestrator.cm, "_get_converter_from_hash"
+                ):
                     cache = orchestrator.cm._get_converter_from_hash
-                    if hasattr(cache, 'cache_info'):
-                        _log.info(f"Converter cache before cleanup: {cache.cache_info()}")
+                    if hasattr(cache, "cache_info"):
+                        _log.info(
+                            f"Converter cache before cleanup: {cache.cache_info()}"
+                        )
 
-                    if hasattr(cache, 'cache'):
+                    if hasattr(cache, "cache"):
                         cache_dict = cache.cache
                         for key, converter in list(cache_dict.items()):
                             try:
@@ -295,9 +332,11 @@ async def cleanup_models_if_needed(orchestrator: BaseOrchestrator):
         # Step 2: Explicitly close ONNX Runtime sessions before clearing converters
         onnx_sessions_found = 0
         try:
-            if hasattr(orchestrator, 'cm') and hasattr(orchestrator.cm, '_get_converter_from_hash'):
+            if hasattr(orchestrator, "cm") and hasattr(
+                orchestrator.cm, "_get_converter_from_hash"
+            ):
                 cache = orchestrator.cm._get_converter_from_hash
-                if hasattr(cache, 'cache'):
+                if hasattr(cache, "cache"):
                     _log.info("Explicitly closing ONNX Runtime sessions...")
 
                     # Deep search for ONNX sessions in converter objects
@@ -314,17 +353,21 @@ async def cleanup_models_if_needed(orchestrator: BaseOrchestrator):
 
         # Step 4: Manually clear cache entries and delete converter objects
         try:
-            if hasattr(orchestrator, 'cm') and hasattr(orchestrator.cm, '_get_converter_from_hash'):
+            if hasattr(orchestrator, "cm") and hasattr(
+                orchestrator.cm, "_get_converter_from_hash"
+            ):
                 cache = orchestrator.cm._get_converter_from_hash
-                if hasattr(cache, 'cache'):
-                    _log.info(f"Manually clearing {len(cache.cache)} cached converters...")
+                if hasattr(cache, "cache"):
+                    _log.info(
+                        f"Manually clearing {len(cache.cache)} cached converters..."
+                    )
 
                     # Explicitly delete each converter and its references
                     for key in list(cache.cache.keys()):
                         try:
                             converter = cache.cache[key]
                             # Delete all remaining attributes
-                            if hasattr(converter, '__dict__'):
+                            if hasattr(converter, "__dict__"):
                                 for attr_name in list(converter.__dict__.keys()):
                                     try:
                                         delattr(converter, attr_name)
@@ -342,10 +385,11 @@ async def cleanup_models_if_needed(orchestrator: BaseOrchestrator):
 
         # Step 5: Force aggressive garbage collection (multiple passes)
         import gc
+
         _log.info("Running aggressive garbage collection...")
         for i in range(3):
             collected = gc.collect(generation=2)  # Full collection
-            _log.debug(f"GC pass {i+1}: collected {collected} objects")
+            _log.debug(f"GC pass {i + 1}: collected {collected} objects")
 
         # Additional passes for good measure
         for _ in range(2):
@@ -354,6 +398,7 @@ async def cleanup_models_if_needed(orchestrator: BaseOrchestrator):
         # Step 6: Advanced PyTorch CUDA memory cleanup
         try:
             import torch
+
             if torch.cuda.is_available():
                 _log.info("Performing advanced CUDA memory cleanup...")
 
@@ -361,7 +406,7 @@ async def cleanup_models_if_needed(orchestrator: BaseOrchestrator):
                 num_devices = torch.cuda.device_count()
 
                 for device_id in range(num_devices):
-                    device = torch.device(f'cuda:{device_id}')
+                    device = torch.device(f"cuda:{device_id}")
 
                     # Empty cache first
                     torch.cuda.empty_cache()
@@ -397,8 +442,9 @@ async def cleanup_models_if_needed(orchestrator: BaseOrchestrator):
         # Step 7: ONNX Runtime specific cleanup
         try:
             import onnxruntime as ort
+
             providers = ort.get_available_providers()
-            if 'CUDAExecutionProvider' in providers:
+            if "CUDAExecutionProvider" in providers:
                 _log.info("Performing ONNX Runtime CUDA cleanup...")
 
                 # ONNX Runtime maintains internal CUDA memory allocator
@@ -413,6 +459,7 @@ async def cleanup_models_if_needed(orchestrator: BaseOrchestrator):
                 # by importing and immediately destroying a minimal session
                 try:
                     import torch
+
                     if torch.cuda.is_available():
                         # Empty cache between GC passes
                         torch.cuda.empty_cache()
@@ -427,6 +474,7 @@ async def cleanup_models_if_needed(orchestrator: BaseOrchestrator):
         # Step 8: Final verification and logging
         try:
             import torch
+
             if torch.cuda.is_available():
                 # One more cache clear and sync
                 torch.cuda.empty_cache()
@@ -434,7 +482,7 @@ async def cleanup_models_if_needed(orchestrator: BaseOrchestrator):
 
                 mem_after = torch.cuda.memory_allocated() / 1024**2
                 mem_reserved = torch.cuda.memory_reserved() / 1024**2
-                mem_freed = mem_before - mem_after if 'mem_before' in locals() else 0
+                mem_freed = mem_before - mem_after if "mem_before" in locals() else 0
 
                 _log.info(f"VRAM allocated after cleanup: {mem_after:.2f} MB")
                 _log.info(f"VRAM reserved after cleanup: {mem_reserved:.2f} MB")
@@ -451,7 +499,9 @@ async def cleanup_models_if_needed(orchestrator: BaseOrchestrator):
                         f"or incomplete cleanup. Reserved: {mem_reserved:.2f} MB"
                     )
                 elif mem_after > 100:
-                    _log.info(f"Remaining {mem_after:.2f} MB is likely CUDA context overhead")
+                    _log.info(
+                        f"Remaining {mem_after:.2f} MB is likely CUDA context overhead"
+                    )
         except Exception as e:
             _log.warning(f"Failed to verify VRAM cleanup: {e}")
 
@@ -470,9 +520,9 @@ def _close_onnx_sessions_recursive(obj, visited=None):
     try:
         # Check if this is an ONNX InferenceSession
         obj_type = str(type(obj))
-        if 'onnxruntime' in obj_type and 'InferenceSession' in obj_type:
+        if "onnxruntime" in obj_type and "InferenceSession" in obj_type:
             # Try to explicitly end the session if method exists
-            if hasattr(obj, '__del__'):
+            if hasattr(obj, "__del__"):
                 try:
                     obj.__del__()
                 except Exception:
@@ -481,7 +531,7 @@ def _close_onnx_sessions_recursive(obj, visited=None):
             return
 
         # Recursively process object attributes
-        if hasattr(obj, '__dict__'):
+        if hasattr(obj, "__dict__"):
             for attr_name in list(obj.__dict__.keys()):
                 try:
                     attr = getattr(obj, attr_name, None)
@@ -526,7 +576,7 @@ def _move_to_cpu_recursive(obj, visited=None):
 
         # Move PyTorch modules to CPU
         if isinstance(obj, torch.nn.Module):
-            obj.to('cpu')
+            obj.to("cpu")
             obj.eval()  # Set to eval mode to release training buffers
 
         # Move tensors to CPU
@@ -535,7 +585,7 @@ def _move_to_cpu_recursive(obj, visited=None):
                 obj.cpu()
 
         # Recursively process object attributes
-        elif hasattr(obj, '__dict__'):
+        elif hasattr(obj, "__dict__"):
             for attr_name in list(obj.__dict__.keys()):
                 try:
                     attr = getattr(obj, attr_name, None)
@@ -576,7 +626,9 @@ async def cleanup_models_after_task(orchestrator: BaseOrchestrator, task_id: str
 
     # Log task counter status
     if _max_tasks_before_restart > 0:
-        _log.info(f"Task completed: {_task_counter}/{_max_tasks_before_restart} tasks before auto-restart")
+        _log.info(
+            f"Task completed: {_task_counter}/{_max_tasks_before_restart} tasks before auto-restart"
+        )
 
         # Check if we should restart
         if _task_counter >= _max_tasks_before_restart:
@@ -603,7 +655,9 @@ async def cleanup_models_after_task(orchestrator: BaseOrchestrator, task_id: str
     for tid, t in orchestrator.tasks.items():
         if tid != task_id and t.task_status in [TaskStatus.PENDING, TaskStatus.STARTED]:
             has_active_tasks = True
-            _log.info(f"Skipping model cleanup: task {tid} is still {t.task_status.value}")
+            _log.info(
+                f"Skipping model cleanup: task {tid} is still {t.task_status.value}"
+            )
             break
 
     if not has_active_tasks:
@@ -634,23 +688,34 @@ async def cleanup_models_background(orchestrator: BaseOrchestrator, task_id: str
                 # before cleaning up models
                 has_active_tasks = False
                 for tid, t in orchestrator.tasks.items():
-                    if tid != task_id and t.task_status in [TaskStatus.PENDING, TaskStatus.STARTED]:
+                    if tid != task_id and t.task_status in [
+                        TaskStatus.PENDING,
+                        TaskStatus.STARTED,
+                    ]:
                         has_active_tasks = True
-                        _log.info(f"Skipping model cleanup: task {tid} is still {t.task_status.value}")
+                        _log.info(
+                            f"Skipping model cleanup: task {tid} is still {t.task_status.value}"
+                        )
                         break
 
                 if not has_active_tasks:
-                    _log.info(f"No active tasks remaining, clearing models to free VRAM...")
+                    _log.info(
+                        f"No active tasks remaining, clearing models to free VRAM..."
+                    )
                     await cleanup_models_if_needed(orchestrator)
                 else:
                     _log.info(f"Active tasks still running, models will remain loaded")
                 return
         except TaskNotFoundError:
-            _log.warning(f"Task {task_id} not found during model cleanup. Stopping cleanup task.")
+            _log.warning(
+                f"Task {task_id} not found during model cleanup. Stopping cleanup task."
+            )
             return
         await asyncio.sleep(docling_serve_settings.cleanup_poll_interval)
 
-    _log.warning(f"Cleanup task for task {task_id} timed out after {max_wait_time} seconds.")
+    _log.warning(
+        f"Cleanup task for task {task_id} timed out after {max_wait_time} seconds."
+    )
 
 
 ##################################
@@ -834,7 +899,9 @@ def create_app():  # noqa: C901
 
         # Schedule background cleanup after task completes
         if background_tasks:
-            background_tasks.add_task(cleanup_models_background, orchestrator, task.task_id)
+            background_tasks.add_task(
+                cleanup_models_background, orchestrator, task.task_id
+            )
 
         return task
 
@@ -872,7 +939,9 @@ def create_app():  # noqa: C901
 
         # Schedule background cleanup after task completes
         if background_tasks:
-            background_tasks.add_task(cleanup_models_background, orchestrator, task.task_id)
+            background_tasks.add_task(
+                cleanup_models_background, orchestrator, task.task_id
+            )
 
         return task
 
@@ -1017,7 +1086,9 @@ def create_app():  # noqa: C901
         conversion_request: ConvertDocumentsRequest,
     ):
         task = await _enque_source(
-            orchestrator=orchestrator, request=conversion_request, background_tasks=background_tasks
+            orchestrator=orchestrator,
+            request=conversion_request,
+            background_tasks=background_tasks,
         )
         completed = await _wait_task_complete(
             orchestrator=orchestrator, task_id=task.task_id
@@ -1120,7 +1191,9 @@ def create_app():  # noqa: C901
         conversion_request: ConvertDocumentsRequest,
     ):
         task = await _enque_source(
-            orchestrator=orchestrator, request=conversion_request, background_tasks=background_tasks
+            orchestrator=orchestrator,
+            request=conversion_request,
+            background_tasks=background_tasks,
         )
         task_queue_position = await orchestrator.get_queue_position(
             task_id=task.task_id
@@ -1190,7 +1263,11 @@ def create_app():  # noqa: C901
             orchestrator: Annotated[BaseOrchestrator, Depends(get_async_orchestrator)],
             request: req_cls,
         ):
-            task = await _enque_source(orchestrator=orchestrator, request=request, background_tasks=background_tasks)
+            task = await _enque_source(
+                orchestrator=orchestrator,
+                request=request,
+                background_tasks=background_tasks,
+            )
             task_queue_position = await orchestrator.get_queue_position(
                 task_id=task.task_id
             )
@@ -1284,7 +1361,11 @@ def create_app():  # noqa: C901
             orchestrator: Annotated[BaseOrchestrator, Depends(get_async_orchestrator)],
             request: req_cls,
         ):
-            task = await _enque_source(orchestrator=orchestrator, request=request, background_tasks=background_tasks)
+            task = await _enque_source(
+                orchestrator=orchestrator,
+                request=request,
+                background_tasks=background_tasks,
+            )
             completed = await _wait_task_complete(
                 orchestrator=orchestrator, task_id=task.task_id
             )

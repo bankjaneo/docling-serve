@@ -259,6 +259,8 @@ environment:
   DOCLING_SERVE_UNLOAD_OLLAMA_MODEL: llama3.2-vision
   # Or for llama-swap:
   DOCLING_SERVE_UNLOAD_LLAMA_SWAP_BASE_URL: http://llama-swap:9292/v1
+  # Optional: API key for llama-swap authentication
+  DOCLING_SERVE_UNLOAD_LLAMA_SWAP_API_KEY: your-api-key-here
 ```
 
 **Complete VRAM management example:**
@@ -273,6 +275,8 @@ environment:
 
   # Unload external models before loading Docling models
   DOCLING_SERVE_UNLOAD_LLAMA_SWAP_BASE_URL: http://172.17.0.1:9292/v1
+  # Optional: API key for llama-swap authentication
+  DOCLING_SERVE_UNLOAD_LLAMA_SWAP_API_KEY: your-api-key-here
 ```
 
 **Note:** The `restart: unless-stopped` policy in docker-compose.yml is required for auto-restart to work.
